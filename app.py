@@ -1,6 +1,7 @@
 
 
-from datetime import date, datetime
+import os
+from datetime import date
 from typing import Optional
 
 import altair as alt
@@ -429,12 +430,16 @@ def logout() -> None:
 # ===========================================================================
 # Supabase Storage helpers
 # ===========================================================================
-def upload_to_supabase_storage(uploaded_file, bu_name: str) -> dict:
+def upload_to_supabase_storage(uploaded_file, bu_name: str, month: str) -> dict:
     supabase = get_supabase_client()
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    clean_bu_name = bu_name.strip().lower().replace(" ", "_")
-    file_path = f"{clean_bu_name}/{timestamp}_{uploaded_file.name}"
+    clean_bu_name = bu_name.strip().replace(" ", "_")
+    ext = os.path.splitext(uploaded_file.name)[1] or ".xlsx"
+    # One submission per BU per month is already enforced, so this name is
+    # unique on its own -- no timestamp needed, and it downloads with a
+    # meaningful name instead of the BU's original (often generic) filename.
+    display_name = f"{clean_bu_name}_{month}{ext}"
+    file_path = f"{clean_bu_name.lower()}/{display_name}"
     file_bytes = uploaded_file.getvalue()
 
     supabase.storage.from_(STORAGE_BUCKET).upload(
@@ -444,7 +449,7 @@ def upload_to_supabase_storage(uploaded_file, bu_name: str) -> dict:
     )
 
     public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(file_path)
-    return {"file_url": public_url, "file_path": file_path}
+    return {"file_url": public_url, "file_path": file_path, "file_name": display_name}
 
 
 # ===========================================================================
@@ -471,7 +476,7 @@ def get_submission_for_bu_month(bu_name: str, month: str) -> Optional[dict]:
 
 
 def create_submission(bu_name: str, month: str, uploaded_file, uploaded_by: str) -> dict:
-    storage_result = upload_to_supabase_storage(uploaded_file, bu_name)
+    storage_result = upload_to_supabase_storage(uploaded_file, bu_name, month)
 
     supabase = get_supabase_client()
     order = get_next_submission_order(month)
@@ -479,7 +484,7 @@ def create_submission(bu_name: str, month: str, uploaded_file, uploaded_by: str)
         "bu_name": bu_name,
         "submission_month": month,
         "submission_order": order,
-        "file_name": uploaded_file.name,
+        "file_name": storage_result["file_name"],
         "file_url": storage_result["file_url"],
         "file_path": storage_result["file_path"],
         "status": "Submitted",
@@ -862,19 +867,19 @@ def render_rank_trend_chart(history_df: pd.DataFrame) -> None:
         st.caption("Trend needs at least two months of submissions -- check back after next month's reports.")
         return
 
-    all_bu_names = history_df["bu_name"].value_counts().index.tolist()
-    chartable_bu_names = sorted(all_bu_names[:MAX_TREND_SERIES])
+    by_activity = history_df["bu_name"].value_counts().index.tolist()
+    all_bu_names = sorted(by_activity)
 
-    if len(all_bu_names) > MAX_TREND_SERIES:
-        st.caption(
-            f"Showing the {MAX_TREND_SERIES} most active Business Units -- beyond that, lines stop being "
-            "visually distinguishable. Use the CSV export below for the complete history."
-        )
+    st.caption(
+        f"{len(all_bu_names)} Business Units in history -- pick up to {MAX_TREND_SERIES} to plot at once "
+        "(beyond that, lines stop being visually distinguishable). Use the CSV export below for the complete history."
+    )
 
+    default_selection = sorted(by_activity[: min(5, len(by_activity))])
     selected = st.multiselect(
         "Business units to plot",
-        options=chartable_bu_names,
-        default=chartable_bu_names[: min(5, len(chartable_bu_names))],
+        options=all_bu_names,
+        default=default_selection,
         key="trend_bu_multiselect",
     )
 
@@ -882,13 +887,19 @@ def render_rank_trend_chart(history_df: pd.DataFrame) -> None:
         st.caption("Select at least one Business Unit to see its rank trend.")
         return
 
+    if len(selected) > MAX_TREND_SERIES:
+        st.warning(f"Showing the first {MAX_TREND_SERIES} of your {len(selected)} selected Business Units -- deselect some to see the rest.")
+        selected = selected[:MAX_TREND_SERIES]
+
     plot_df = history_df[history_df["bu_name"].isin(selected)].copy()
     months_sorted = sorted(plot_df["submission_month"].unique())
 
-    # Color scale is keyed to the full chartable domain (not just the current
-    # selection) so a BU keeps the same color as the filter changes -- color
-    # follows the entity, never the current subset.
-    color_scale = alt.Scale(domain=chartable_bu_names, range=TREND_CHART_PALETTE[: len(chartable_bu_names)])
+    # Color scale is keyed to the current selection (sorted, so order is
+    # stable while the selection itself doesn't change) -- with more BUs
+    # than palette slots, no fixed global assignment can hold for all of
+    # them, so colors are only guaranteed stable within one selection.
+    selected_sorted = sorted(selected)
+    color_scale = alt.Scale(domain=selected_sorted, range=TREND_CHART_PALETTE[: len(selected_sorted)])
 
     line_layer = (
         alt.Chart(plot_df)
