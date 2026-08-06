@@ -1,68 +1,9 @@
-"""
-BU Flexible Report Submission & Tracking System
-------------------------------------------------
-Single-file Streamlit app deployed on Streamlit Community Cloud.
 
-Stack:
-- Auth + data: Supabase (users, bu_submissions tables)
-- File storage: Supabase Storage bucket "bu-reports" (public bucket).
-  No Google Drive / OAuth involved -- files are stored and served straight
-  from Supabase, which is far simpler to set up than Drive's service-account
-  or OAuth flows.
-- Ranking: submission ARRIVAL ORDER for the month (no Excel content is parsed
-  or validated -- files are accepted and stored as-is). Each BU may submit
-  once per month; admin can manually override rank/status afterwards.
-
-Required Supabase schema (create these tables before running the app):
-
-    create table users (
-        id uuid primary key default gen_random_uuid(),
-        username text unique not null,
-        password_hash text not null,       -- bcrypt hash, see hash_password() below
-        role text not null check (role in ('admin', 'bu_user')) default 'bu_user',
-        bu_name text,
-        status text not null check (status in ('pending', 'approved', 'rejected', 'suspended')) default 'pending',
-        created_at timestamptz default now()
-    );
-
--- If your users table already exists with the old check constraint (no
--- 'suspended' option), run this once to allow it:
---
---   alter table users drop constraint users_status_check;
---   alter table users add constraint users_status_check
---     check (status in ('pending', 'approved', 'rejected', 'suspended'));
-
-    create table bu_submissions (
-        id uuid primary key default gen_random_uuid(),
-        bu_name text not null,
-        submission_month text not null,        -- 'YYYY-MM'
-        submission_order int not null,         -- rank within the month; admin-editable
-        file_name text not null,
-        file_url text not null,
-        file_path text not null,               -- storage object path, for cleanup/reference
-        status text not null check (status in ('Submitted', 'Under Review', 'Incomplete / Needs Fix', 'Approved')) default 'Submitted',
-        uploaded_by text not null,
-        created_at timestamptz default now()
-    );
-
-Also create a Storage bucket named "bu-reports" (Supabase Dashboard ->
-Storage -> New bucket -> name "bu-reports" -> Public bucket: ON), so
-get_public_url() returns links that are directly viewable/downloadable.
-
--- The admin account is seeded manually (self-registration always creates a
--- 'bu_user' pending account) -- insert one row directly with role='admin'
--- and status='approved':
---
---   insert into users (username, password_hash, role, status)
---   values ('admin', '<bcrypt hash>', 'admin', 'approved');
---
--- New users self-register as role='bu_user', status='pending', and cannot
--- log in until an admin approves them from the Admin Dashboard.
-"""
 
 from datetime import date, datetime
 from typing import Optional
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
@@ -84,6 +25,20 @@ STORAGE_BUCKET = "bu-reports"
 STATUS_OPTIONS = ["Submitted", "Under Review", "Incomplete / Needs Fix", "Approved"]
 USER_STATUS_OPTIONS = ["pending", "approved", "rejected", "suspended"]
 RANK_MEDALS = {1: "\U0001F947", 2: "\U0001F948", 3: "\U0001F949"}
+
+# Colorblind-validated categorical palette, fixed order (never cycled/reassigned
+# per filter change) -- see dataviz skill references/palette.md.
+TREND_CHART_PALETTE = [
+    "#2a78d6",  # blue
+    "#eb6834",  # orange
+    "#1baf7a",  # aqua
+    "#eda100",  # yellow
+    "#e87ba4",  # magenta
+    "#008300",  # green
+    "#4a3aa7",  # violet
+    "#e34948",  # red
+]
+MAX_TREND_SERIES = len(TREND_CHART_PALETTE)
 
 
 # ===========================================================================
@@ -565,6 +520,18 @@ def get_available_months() -> list:
     return months
 
 
+def get_all_submissions_history() -> pd.DataFrame:
+    supabase = get_supabase_client()
+    resp = (
+        supabase.table("bu_submissions")
+        .select("bu_name, submission_month, submission_order, status, file_name, uploaded_by, created_at")
+        .order("submission_month")
+        .order("submission_order")
+        .execute()
+    )
+    return pd.DataFrame(resp.data or [])
+
+
 def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> None:
     """Persist admin edits made in the data editor: status changes are applied
     directly; submission_order changes are resolved into a strict 1..N
@@ -884,6 +851,103 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
             st.error(f"Could not apply changes: {exc}")
 
 
+def render_rank_trend_chart(history_df: pd.DataFrame) -> None:
+    st.markdown("#### \U0001F4C8 Rank Trend by Business Unit")
+
+    if history_df.empty:
+        st.caption("No submission history yet.")
+        return
+
+    if history_df["submission_month"].nunique() < 2:
+        st.caption("Trend needs at least two months of submissions -- check back after next month's reports.")
+        return
+
+    all_bu_names = history_df["bu_name"].value_counts().index.tolist()
+    chartable_bu_names = sorted(all_bu_names[:MAX_TREND_SERIES])
+
+    if len(all_bu_names) > MAX_TREND_SERIES:
+        st.caption(
+            f"Showing the {MAX_TREND_SERIES} most active Business Units -- beyond that, lines stop being "
+            "visually distinguishable. Use the CSV export below for the complete history."
+        )
+
+    selected = st.multiselect(
+        "Business units to plot",
+        options=chartable_bu_names,
+        default=chartable_bu_names[: min(5, len(chartable_bu_names))],
+        key="trend_bu_multiselect",
+    )
+
+    if not selected:
+        st.caption("Select at least one Business Unit to see its rank trend.")
+        return
+
+    plot_df = history_df[history_df["bu_name"].isin(selected)].copy()
+    months_sorted = sorted(plot_df["submission_month"].unique())
+
+    # Color scale is keyed to the full chartable domain (not just the current
+    # selection) so a BU keeps the same color as the filter changes -- color
+    # follows the entity, never the current subset.
+    color_scale = alt.Scale(domain=chartable_bu_names, range=TREND_CHART_PALETTE[: len(chartable_bu_names)])
+
+    line_layer = (
+        alt.Chart(plot_df)
+        .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=60, filled=True))
+        .encode(
+            x=alt.X("submission_month:O", sort=months_sorted, title="Month", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("submission_order:Q", title="Rank (1 = best)", scale=alt.Scale(reverse=True), axis=alt.Axis(tickMinStep=1)),
+            color=alt.Color("bu_name:N", scale=color_scale, title="Business Unit"),
+            tooltip=[
+                alt.Tooltip("bu_name:N", title="Business Unit"),
+                alt.Tooltip("submission_month:O", title="Month"),
+                alt.Tooltip("submission_order:Q", title="Rank"),
+                alt.Tooltip("status:N", title="Status"),
+            ],
+        )
+    )
+
+    layers = [line_layer]
+    if len(selected) <= 4:
+        # Direct-label small series counts in addition to the legend.
+        last_points = plot_df.sort_values("submission_month").groupby("bu_name", as_index=False).last()
+        layers.append(
+            alt.Chart(last_points)
+            .mark_text(align="left", dx=8, fontSize=11, fontWeight="bold")
+            .encode(
+                x=alt.X("submission_month:O", sort=months_sorted),
+                y=alt.Y("submission_order:Q", scale=alt.Scale(reverse=True)),
+                text="bu_name:N",
+                color=alt.Color("bu_name:N", scale=color_scale, legend=None),
+            )
+        )
+
+    chart = alt.layer(*layers).properties(height=320).interactive()
+    st.altair_chart(chart, use_container_width=True)
+
+    with st.expander("View as table"):
+        pivot = plot_df.pivot_table(
+            index="submission_month", columns="bu_name", values="submission_order", aggfunc="first"
+        ).sort_index()
+        st.dataframe(pivot, use_container_width=True)
+
+
+def render_ranking_export(history_df: pd.DataFrame) -> None:
+    st.markdown("#### \U0001F4E4 Export Ranking History")
+
+    if history_df.empty:
+        st.caption("Nothing to export yet.")
+        return
+
+    csv_bytes = history_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download Ranking History (CSV)",
+        data=csv_bytes,
+        file_name=f"ranking_history_{date.today().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def render_admin_dashboard() -> None:
     render_app_header("Review submissions and manage rankings")
 
@@ -934,6 +998,13 @@ def render_admin_dashboard() -> None:
 
     st.markdown("#### \U0001F4CB Submissions & Ranking Overrides")
     render_admin_month_table(selected_month, selected_bu)
+
+    st.divider()
+    history_df = get_all_submissions_history()
+    render_rank_trend_chart(history_df)
+
+    st.divider()
+    render_ranking_export(history_df)
 
 
 # ===========================================================================
