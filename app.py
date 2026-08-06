@@ -22,6 +22,7 @@ st.set_page_config(
 
 MAX_UPLOAD_MB = 15
 STORAGE_BUCKET = "bu-reports"
+DEADLINE_DAY_OF_MONTH = 14  # submissions due within the first 14 days of each month
 
 STATUS_OPTIONS = ["Submitted", "Under Review", "Incomplete / Needs Fix", "Approved"]
 USER_STATUS_OPTIONS = ["pending", "approved", "rejected", "suspended"]
@@ -525,6 +526,15 @@ def get_available_months() -> list:
     return months
 
 
+def get_overdue_bus(month: str) -> list:
+    """Approved BU accounts that have not submitted for the given month."""
+    supabase = get_supabase_client()
+    resp = supabase.table("users").select("bu_name").eq("role", "bu_user").eq("status", "approved").execute()
+    all_bu_names = sorted({row["bu_name"] for row in (resp.data or []) if row.get("bu_name")})
+    submitted = {s["bu_name"] for s in get_submissions_for_month(month)}
+    return [bu for bu in all_bu_names if bu not in submitted]
+
+
 def get_all_submissions_history() -> pd.DataFrame:
     supabase = get_supabase_client()
     resp = (
@@ -683,6 +693,13 @@ def render_bu_dashboard() -> None:
     st.markdown(f"#### \U0001F4C5 Period: {month_label}")
 
     existing = get_submission_for_bu_month(bu_name, month)
+
+    if not existing:
+        days_remaining = DEADLINE_DAY_OF_MONTH - today.day
+        if days_remaining > 0:
+            st.warning(f"⏳ {days_remaining} day(s) left until the submission deadline (day {DEADLINE_DAY_OF_MONTH} of the month).")
+        else:
+            st.error(f"⚠️ Deadline passed — submissions were due by day {DEADLINE_DAY_OF_MONTH} of the month. Please submit as soon as possible.")
 
     if existing:
         st.success(f"Your report for {month_label} has been submitted!")
@@ -961,6 +978,16 @@ def render_ranking_export(history_df: pd.DataFrame) -> None:
 
 def render_admin_dashboard() -> None:
     render_app_header("Review submissions and manage rankings")
+
+    today = date.today()
+    if today.day > DEADLINE_DAY_OF_MONTH:
+        overdue = get_overdue_bus(today.strftime("%Y-%m"))
+        if overdue:
+            st.error(
+                f"⚠️ {len(overdue)} Business Unit(s) missed the day-{DEADLINE_DAY_OF_MONTH} deadline "
+                f"for {today.strftime('%B %Y')}: {', '.join(overdue)}"
+            )
+            st.divider()
 
     render_pending_approvals()
     st.divider()
