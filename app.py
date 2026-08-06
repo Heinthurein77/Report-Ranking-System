@@ -5,10 +5,13 @@ Single-file Streamlit app deployed on Streamlit Community Cloud.
 
 Stack:
 - Auth + data: Supabase (users, bu_submissions tables)
-- File storage: Google Drive (GCP service account)
+- File storage: Supabase Storage bucket "bu-reports" (public bucket).
+  No Google Drive / OAuth involved -- files are stored and served straight
+  from Supabase, which is far simpler to set up than Drive's service-account
+  or OAuth flows.
 - Ranking: submission ARRIVAL ORDER for the month (no Excel content is parsed
-  or validated -- files are accepted and stored as-is). Admin can manually
-  override rank/status afterwards.
+  or validated -- files are accepted and stored as-is). Each BU may submit
+  once per month; admin can manually override rank/status afterwards.
 
 Required Supabase schema (create these tables before running the app):
 
@@ -26,15 +29,18 @@ Required Supabase schema (create these tables before running the app):
         id uuid primary key default gen_random_uuid(),
         bu_name text not null,
         submission_month text not null,        -- 'YYYY-MM'
-        submission_order int not null,         -- immutable arrival sequence (1st, 2nd, ...)
-        rank int not null,                     -- current effective rank; admin-editable
+        submission_order int not null,         -- rank within the month; admin-editable
         file_name text not null,
-        drive_file_id text not null,
-        drive_link text not null,
-        status text not null check (status in ('Submitted', 'Pending Review', 'Rejected', 'Incomplete')) default 'Submitted',
+        file_url text not null,
+        file_path text not null,               -- storage object path, for cleanup/reference
+        status text not null check (status in ('Submitted', 'Under Review', 'Incomplete / Needs Fix', 'Approved')) default 'Submitted',
         uploaded_by text not null,
         created_at timestamptz default now()
     );
+
+Also create a Storage bucket named "bu-reports" (Supabase Dashboard ->
+Storage -> New bucket -> name "bu-reports" -> Public bucket: ON), so
+get_public_url() returns links that are directly viewable/downloadable.
 
 -- The admin account is seeded manually (self-registration always creates a
 -- 'bu_user' pending account) -- insert one row directly with role='admin'
@@ -47,16 +53,12 @@ Required Supabase schema (create these tables before running the app):
 -- log in until an admin approves them from the Admin Dashboard.
 """
 
-import io
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 import bcrypt
 
 # ===========================================================================
@@ -69,17 +71,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 MAX_UPLOAD_MB = 15
+STORAGE_BUCKET = "bu-reports"
 
-STATUS_OPTIONS = ["Submitted", "Pending Review", "Rejected", "Incomplete"]
+STATUS_OPTIONS = ["Submitted", "Under Review", "Incomplete / Needs Fix", "Approved"]
 RANK_MEDALS = {1: "\U0001F947", 2: "\U0001F948", 3: "\U0001F949"}
-
-
-def get_mime_type(filename: str) -> str:
-    if filename.lower().endswith(".xls"):
-        return "application/vnd.ms-excel"
-    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 # ===========================================================================
@@ -182,6 +178,16 @@ def inject_custom_css() -> None:
             box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
         }
 
+        .status-badge {
+            background-color: #dcfce7;
+            color: #15803d;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.8rem;
+            display: inline-block;
+        }
+
         /* Buttons */
         .stButton > button, .stDownloadButton > button {
             border-radius: 10px;
@@ -259,17 +265,6 @@ def get_supabase_client() -> Client:
         st.error("Supabase credentials are missing from st.secrets. Please configure `[supabase]` in secrets.toml.")
         st.stop()
     return create_client(url, key)
-
-
-@st.cache_resource(show_spinner=False)
-def get_drive_service():
-    try:
-        sa_info = dict(st.secrets["gcp_service_account"])
-    except KeyError:
-        st.error("Google service account credentials are missing from st.secrets. Please configure `[gcp_service_account]`.")
-        st.stop()
-    creds = service_account.Credentials.from_service_account_info(sa_info, scopes=DRIVE_SCOPES)
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
 # ===========================================================================
@@ -356,24 +351,24 @@ def logout() -> None:
 
 
 # ===========================================================================
-# Google Drive helpers
+# Supabase Storage helpers
 # ===========================================================================
-def upload_file_to_drive(file_bytes: bytes, filename: str) -> dict:
-    service = get_drive_service()
-    try:
-        folder_id = st.secrets["GOOGLE_DRIVE_FOLDER_ID"]
-    except KeyError:
-        raise RuntimeError("GOOGLE_DRIVE_FOLDER_ID is missing from st.secrets.")
+def upload_to_supabase_storage(uploaded_file, bu_name: str) -> dict:
+    supabase = get_supabase_client()
 
-    file_metadata = {"name": filename, "parents": [folder_id]}
-    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=get_mime_type(filename), resumable=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    clean_bu_name = bu_name.strip().lower().replace(" ", "_")
+    file_path = f"{clean_bu_name}/{timestamp}_{uploaded_file.name}"
+    file_bytes = uploaded_file.getvalue()
 
-    created = (
-        service.files()
-        .create(body=file_metadata, media_body=media, fields="id, name, webViewLink")
-        .execute()
+    supabase.storage.from_(STORAGE_BUCKET).upload(
+        path=file_path,
+        file=file_bytes,
+        file_options={"content-type": uploaded_file.type or "application/octet-stream"},
     )
-    return created
+
+    public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(file_path)
+    return {"file_url": public_url, "file_path": file_path}
 
 
 # ===========================================================================
@@ -385,17 +380,32 @@ def get_next_submission_order(month: str) -> int:
     return (resp.count or 0) + 1
 
 
-def create_submission(bu_name: str, month: str, filename: str, drive_file: dict, uploaded_by: str) -> dict:
+def get_submission_for_bu_month(bu_name: str, month: str) -> Optional[dict]:
+    supabase = get_supabase_client()
+    resp = (
+        supabase.table("bu_submissions")
+        .select("*")
+        .eq("bu_name", bu_name)
+        .eq("submission_month", month)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    return rows[0] if rows else None
+
+
+def create_submission(bu_name: str, month: str, uploaded_file, uploaded_by: str) -> dict:
+    storage_result = upload_to_supabase_storage(uploaded_file, bu_name)
+
     supabase = get_supabase_client()
     order = get_next_submission_order(month)
     record = {
         "bu_name": bu_name,
         "submission_month": month,
         "submission_order": order,
-        "rank": order,
-        "file_name": filename,
-        "drive_file_id": drive_file["id"],
-        "drive_link": drive_file.get("webViewLink", ""),
+        "file_name": uploaded_file.name,
+        "file_url": storage_result["file_url"],
+        "file_path": storage_result["file_path"],
         "status": "Submitted",
         "uploaded_by": uploaded_by,
     }
@@ -421,7 +431,7 @@ def get_submissions_for_month(month: str) -> list:
         supabase.table("bu_submissions")
         .select("*")
         .eq("submission_month", month)
-        .order("rank")
+        .order("submission_order")
         .execute()
     )
     return resp.data or []
@@ -436,9 +446,9 @@ def get_available_months() -> list:
 
 def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> None:
     """Persist admin edits made in the data editor: status changes are applied
-    directly; rank changes are resolved into a strict 1..N ordering (ties
-    broken by original row order), which naturally shifts every other BU's
-    rank when one submission is moved up or down."""
+    directly; submission_order changes are resolved into a strict 1..N
+    ordering (ties broken by original row order), which naturally shifts
+    every other BU's rank when one submission is moved up or down."""
     supabase = get_supabase_client()
 
     for i in range(len(original_df)):
@@ -448,12 +458,12 @@ def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame) ->
         if new_status != old_status:
             supabase.table("bu_submissions").update({"status": new_status}).eq("id", sub_id).execute()
 
-    requested = [(i, original_df.iloc[i]["id"], edited_df.iloc[i]["rank"]) for i in range(len(original_df))]
+    requested = [(i, original_df.iloc[i]["id"], edited_df.iloc[i]["submission_order"]) for i in range(len(original_df))]
     requested_sorted = sorted(requested, key=lambda t: (t[2], t[0]))
 
-    for new_rank, (orig_idx, sub_id, _) in enumerate(requested_sorted, start=1):
-        if new_rank != original_df.iloc[orig_idx]["rank"]:
-            supabase.table("bu_submissions").update({"rank": new_rank}).eq("id", sub_id).execute()
+    for new_order, (orig_idx, sub_id, _) in enumerate(requested_sorted, start=1):
+        if new_order != original_df.iloc[orig_idx]["submission_order"]:
+            supabase.table("bu_submissions").update({"submission_order": new_order}).eq("id", sub_id).execute()
 
 
 # ===========================================================================
@@ -555,22 +565,6 @@ def render_login() -> None:
 # ===========================================================================
 # UI: BU user dashboard
 # ===========================================================================
-def render_submission_success(order: int, rank: int, drive_link: str) -> None:
-    medal = RANK_MEDALS.get(rank, "\U0001F3C5")
-    st.markdown(
-        f"""
-        <div class="metric-card gold">
-            <div class="label">Submission Confirmed</div>
-            <div class="rank-badge">{medal}</div>
-            <div class="bu-name">You are Submission #{order} (Rank {rank}) for this month!</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if drive_link:
-        st.markdown(f"[\U0001F4C2 View your file on Google Drive]({drive_link})")
-
-
 def render_bu_dashboard() -> None:
     render_app_header("Upload your month-end report")
     bu_name = st.session_state["bu_name"]
@@ -579,14 +573,49 @@ def render_bu_dashboard() -> None:
         st.error("Your account is not linked to a Business Unit. Please contact your admin.")
         return
 
-    col_upload, col_status = st.columns([1.4, 1])
+    today = date.today()
+    month = today.strftime("%Y-%m")
+    month_label = today.strftime("%B %Y")
 
-    with col_upload:
-        st.markdown("#### \U0001F4E4 Submit Report")
-        period_choice = st.date_input("Reporting month", value=date.today().replace(day=1))
-        month = period_choice.strftime("%Y-%m")
+    st.markdown(f"#### \U0001F4C5 Period: {month_label}")
 
-        uploaded_file = st.file_uploader("Upload report (.xlsx or .xls) — any format accepted", type=["xlsx", "xls"])
+    existing = get_submission_for_bu_month(bu_name, month)
+
+    if existing:
+        st.success(f"Your report for {month_label} has been submitted!")
+        col1, col2 = st.columns(2)
+        with col1:
+            medal = RANK_MEDALS.get(existing["submission_order"], "\U0001F3C5")
+            st.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="label">Your Current Submission Order</div>
+                    <div class="rank-badge">{medal}</div>
+                    <div class="score">Rank #{existing['submission_order']}</div>
+                    <div class="label" style="margin-top:0.6rem;">Submitted on: {existing['created_at'][:10]}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col2:
+            st.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="label">Uploaded File Details</div>
+                    <div class="bu-name">{existing['file_name']}</div>
+                    <span class="status-badge">{existing['status']}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"[\U0001F4E5 View / Download File]({existing['file_url']})")
+    else:
+        st.info(
+            "\U0001F4A1 You can upload ANY Excel file format (.xlsx, .xls). "
+            "Rank is assigned automatically based on submission time, and you can submit once per month."
+        )
+
+        uploaded_file = st.file_uploader("Upload Excel Report", type=["xlsx", "xls"])
 
         if uploaded_file is not None:
             size_mb = uploaded_file.size / (1024 * 1024)
@@ -594,48 +623,22 @@ def render_bu_dashboard() -> None:
                 st.error(f"File is {size_mb:.1f} MB, which exceeds the {MAX_UPLOAD_MB} MB limit.")
             else:
                 st.caption(f"Ready to submit: **{uploaded_file.name}** ({size_mb:.2f} MB)")
-                if st.button("Submit Report", use_container_width=True):
+                if st.button("Submit Report Now", use_container_width=True):
                     try:
-                        file_bytes = uploaded_file.getvalue()
-
-                        with st.spinner("Uploading to Google Drive..."):
-                            drive_file = upload_file_to_drive(file_bytes, uploaded_file.name)
-
-                        with st.spinner("Saving submission..."):
-                            submission = create_submission(
-                                bu_name, month, uploaded_file.name, drive_file, st.session_state["username"]
-                            )
-
-                        st.success("Report submitted successfully!")
-                        render_submission_success(
-                            submission["submission_order"], submission["rank"], submission["drive_link"]
-                        )
+                        with st.spinner("Uploading to Supabase Storage..."):
+                            submission = create_submission(bu_name, month, uploaded_file, st.session_state["username"])
+                        st.balloons()
+                        st.success(f"Report uploaded successfully! You are Submission #{submission['submission_order']} for this month.")
+                        st.rerun()
                     except Exception as exc:
                         st.error(f"Submission failed: {exc}")
-
-    with col_status:
-        st.markdown("#### \U0001F4CB This Month's Order")
-        month_submissions = get_submissions_for_month(month)
-        if not month_submissions:
-            st.markdown('<div class="info-card">No submissions for this period yet.</div>', unsafe_allow_html=True)
-        else:
-            rows = [
-                {
-                    "Rank": s["rank"],
-                    "BU": s["bu_name"],
-                    "Status": s["status"],
-                    "You": "✅" if s["bu_name"] == bu_name else "",
-                }
-                for s in month_submissions
-            ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     st.markdown("#### \U0001F4DC Your Submission History")
     history_df = get_submissions_for_bu(bu_name)
     if history_df.empty:
         st.caption("No submissions yet.")
     else:
-        display_cols = ["submission_month", "file_name", "submission_order", "rank", "status", "created_at", "drive_link"]
+        display_cols = ["submission_month", "file_name", "submission_order", "status", "created_at", "file_url"]
         display_cols = [c for c in display_cols if c in history_df.columns]
         st.dataframe(history_df[display_cols], use_container_width=True, hide_index=True)
 
@@ -676,16 +679,15 @@ def render_admin_month_table(month: str) -> None:
         return
 
     original_df = pd.DataFrame(submissions)
-    editable_df = original_df[["rank", "bu_name", "file_name", "status", "submission_order", "created_at"]].copy()
+    editable_df = original_df[["submission_order", "bu_name", "file_name", "status", "created_at"]].copy()
 
     edited_df = st.data_editor(
         editable_df,
         column_config={
-            "rank": st.column_config.NumberColumn("Rank", min_value=1, step=1),
+            "submission_order": st.column_config.NumberColumn("Rank", min_value=1, step=1),
             "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
             "file_name": st.column_config.TextColumn("File", disabled=True),
             "status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS),
-            "submission_order": st.column_config.NumberColumn("Original Order", disabled=True),
             "created_at": st.column_config.TextColumn("Submitted At", disabled=True),
         },
         hide_index=True,
@@ -694,9 +696,9 @@ def render_admin_month_table(month: str) -> None:
         key=f"editor_{month}",
     )
 
-    with st.expander("View original files on Google Drive"):
+    with st.expander("View / download original files"):
         for s in submissions:
-            st.markdown(f"- **{s['bu_name']}** — [{s['file_name']}]({s['drive_link']})")
+            st.markdown(f"- **{s['bu_name']}** — [{s['file_name']}]({s['file_url']})")
 
     if st.button("Apply Changes", key=f"apply_{month}", use_container_width=True):
         try:
@@ -724,7 +726,7 @@ def render_admin_dashboard() -> None:
     top_submissions = get_submissions_for_month(selected_month)
     col1, col2 = st.columns(2)
     for col, rank in ((col1, 1), (col2, 2)):
-        match = next((s for s in top_submissions if s["rank"] == rank), None)
+        match = next((s for s in top_submissions if s["submission_order"] == rank), None)
         with col:
             if match is None:
                 st.markdown(
@@ -740,7 +742,7 @@ def render_admin_dashboard() -> None:
                         <div class="label">Rank {rank}</div>
                         <div class="rank-badge">{medal}</div>
                         <div class="bu-name">{match['bu_name']}</div>
-                        <div class="score">{match['status']}</div>
+                        <span class="status-badge">{match['status']}</span>
                     </div>
                     """,
                     unsafe_allow_html=True,
