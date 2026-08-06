@@ -14,10 +14,21 @@ Required Supabase schema (create these tables before running the app):
         id uuid primary key default gen_random_uuid(),
         username text unique not null,
         password_hash text not null,       -- bcrypt hash, see hash_password() below
-        role text not null check (role in ('admin', 'bu_user')),
+        role text not null check (role in ('admin', 'bu_user')) default 'bu_user',
         bu_name text,
+        status text not null check (status in ('pending', 'approved', 'rejected')) default 'pending',
         created_at timestamptz default now()
     );
+
+-- The admin account is seeded manually (self-registration always creates a
+-- 'bu_user' pending account) -- insert one row directly with role='admin'
+-- and status='approved':
+--
+--   insert into users (username, password_hash, role, status)
+--   values ('admin', '<bcrypt hash>', 'admin', 'approved');
+--
+-- New users self-register as role='bu_user', status='pending', and cannot
+-- log in until an admin approves them from the Admin Dashboard.
 
     create table bu_submissions (
         id uuid primary key default gen_random_uuid(),
@@ -303,6 +314,43 @@ def authenticate(username: str, password: str) -> Optional[dict]:
     return None
 
 
+def username_exists(username: str) -> bool:
+    supabase = get_supabase_client()
+    resp = supabase.table("users").select("id").eq("username", username).limit(1).execute()
+    return bool(resp.data)
+
+
+def register_user(username: str, password: str, bu_name: str) -> None:
+    """Self-registration always creates a pending BU user awaiting admin approval."""
+    supabase = get_supabase_client()
+    password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    record = {
+        "username": username,
+        "password_hash": password_hash,
+        "role": "bu_user",
+        "bu_name": bu_name,
+        "status": "pending",
+    }
+    supabase.table("users").insert(record).execute()
+
+
+def get_pending_users() -> pd.DataFrame:
+    supabase = get_supabase_client()
+    resp = (
+        supabase.table("users")
+        .select("id, username, bu_name, created_at")
+        .eq("status", "pending")
+        .order("created_at")
+        .execute()
+    )
+    return pd.DataFrame(resp.data or [])
+
+
+def update_user_status(user_id: str, status: str) -> None:
+    supabase = get_supabase_client()
+    supabase.table("users").update({"status": status}).eq("id", user_id).execute()
+
+
 def init_session_state() -> None:
     defaults = {
         "authenticated": False,
@@ -511,26 +559,59 @@ def render_login() -> None:
     st.markdown("<h2>\U0001F4CA BU Ranking System</h2>", unsafe_allow_html=True)
     st.markdown('<p class="subtitle">Sign in to submit or review monthly performance</p>', unsafe_allow_html=True)
 
-    with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("Username", placeholder="e.g. bu_sales")
-        password = st.text_input("Password", type="password", placeholder="••••••••")
-        submitted = st.form_submit_button("Log in", use_container_width=True)
+    login_tab, register_tab = st.tabs(["Log in", "Register"])
 
-    if submitted:
-        if not username or not password:
-            st.error("Please enter both username and password.")
-        else:
-            with st.spinner("Verifying credentials..."):
-                user = authenticate(username.strip(), password)
-            if user is None:
-                st.error("Invalid username or password.")
+    with login_tab:
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Username", placeholder="e.g. bu_sales")
+            password = st.text_input("Password", type="password", placeholder="••••••••")
+            submitted = st.form_submit_button("Log in", use_container_width=True)
+
+        if submitted:
+            if not username or not password:
+                st.error("Please enter both username and password.")
             else:
-                st.session_state["authenticated"] = True
-                st.session_state["role"] = user["role"]
-                st.session_state["username"] = user["username"]
-                st.session_state["bu_name"] = user.get("bu_name")
-                st.session_state["user_id"] = user["id"]
-                st.rerun()
+                with st.spinner("Verifying credentials..."):
+                    user = authenticate(username.strip(), password)
+                if user is None:
+                    st.error("Invalid username or password.")
+                elif user["status"] == "pending":
+                    st.warning("Your registration is awaiting admin approval. Please check back later.")
+                elif user["status"] == "rejected":
+                    st.error("Your registration was rejected. Please contact your admin.")
+                else:
+                    st.session_state["authenticated"] = True
+                    st.session_state["role"] = user["role"]
+                    st.session_state["username"] = user["username"]
+                    st.session_state["bu_name"] = user.get("bu_name")
+                    st.session_state["user_id"] = user["id"]
+                    st.rerun()
+
+    with register_tab:
+        st.caption("New Business Unit accounts require admin approval before you can log in.")
+        with st.form("register_form", clear_on_submit=True):
+            reg_username = st.text_input("Choose a username", key="reg_username")
+            reg_bu_name = st.text_input("Business Unit name", key="reg_bu_name", placeholder="e.g. Sales BU")
+            reg_password = st.text_input("Choose a password", type="password", key="reg_password")
+            reg_password_confirm = st.text_input("Confirm password", type="password", key="reg_password_confirm")
+            reg_submitted = st.form_submit_button("Request Access", use_container_width=True)
+
+        if reg_submitted:
+            if not reg_username or not reg_bu_name or not reg_password:
+                st.error("Please fill in all fields.")
+            elif len(reg_password) < 8:
+                st.error("Password must be at least 8 characters.")
+            elif reg_password != reg_password_confirm:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    if username_exists(reg_username.strip()):
+                        st.error("That username is already taken.")
+                    else:
+                        register_user(reg_username.strip(), reg_password, reg_bu_name.strip())
+                        st.success("Registration submitted! An admin must approve your account before you can log in.")
+                except Exception as exc:
+                    st.error(f"Registration failed: {exc}")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -633,8 +714,37 @@ def render_bu_dashboard() -> None:
 # ===========================================================================
 # UI: Admin dashboard
 # ===========================================================================
+def render_pending_approvals() -> None:
+    st.markdown("#### ✅ Pending User Approvals")
+    pending_df = get_pending_users()
+
+    if pending_df.empty:
+        st.caption("No pending registrations.")
+        return
+
+    for _, row in pending_df.iterrows():
+        col_info, col_approve, col_reject = st.columns([3, 1, 1])
+        with col_info:
+            st.markdown(
+                f"**{row['username']}** — {row['bu_name']}  \n"
+                f"<span style='color:#64748B;font-size:0.8rem;'>Requested {row['created_at']}</span>",
+                unsafe_allow_html=True,
+            )
+        with col_approve:
+            if st.button("Approve", key=f"approve_{row['id']}", use_container_width=True):
+                update_user_status(row["id"], "approved")
+                st.rerun()
+        with col_reject:
+            if st.button("Reject", key=f"reject_{row['id']}", use_container_width=True):
+                update_user_status(row["id"], "rejected")
+                st.rerun()
+
+
 def render_admin_dashboard() -> None:
     render_app_header("Monitor submissions and BU rankings across the organization")
+
+    render_pending_approvals()
+    st.divider()
 
     periods = get_available_periods()
     if not periods:
