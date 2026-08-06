@@ -21,9 +21,16 @@ Required Supabase schema (create these tables before running the app):
         password_hash text not null,       -- bcrypt hash, see hash_password() below
         role text not null check (role in ('admin', 'bu_user')) default 'bu_user',
         bu_name text,
-        status text not null check (status in ('pending', 'approved', 'rejected')) default 'pending',
+        status text not null check (status in ('pending', 'approved', 'rejected', 'suspended')) default 'pending',
         created_at timestamptz default now()
     );
+
+-- If your users table already exists with the old check constraint (no
+-- 'suspended' option), run this once to allow it:
+--
+--   alter table users drop constraint users_status_check;
+--   alter table users add constraint users_status_check
+--     check (status in ('pending', 'approved', 'rejected', 'suspended'));
 
     create table bu_submissions (
         id uuid primary key default gen_random_uuid(),
@@ -75,11 +82,12 @@ MAX_UPLOAD_MB = 15
 STORAGE_BUCKET = "bu-reports"
 
 STATUS_OPTIONS = ["Submitted", "Under Review", "Incomplete / Needs Fix", "Approved"]
+USER_STATUS_OPTIONS = ["pending", "approved", "rejected", "suspended"]
 RANK_MEDALS = {1: "\U0001F947", 2: "\U0001F948", 3: "\U0001F949"}
 
 
 # ===========================================================================
-# Custom CSS — modern SaaS dashboard look
+# Custom CSS — restrained, enterprise-dashboard look
 # ===========================================================================
 def inject_custom_css() -> None:
     st.markdown(
@@ -87,9 +95,25 @@ def inject_custom_css() -> None:
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
+        :root {
+            --color-bg: #F7F8FA;
+            --color-surface: #FFFFFF;
+            --color-border: #E4E7EC;
+            --color-text: #101828;
+            --color-text-muted: #667085;
+            --color-primary: #3730A3;
+            --color-primary-hover: #2E2585;
+            --color-sidebar: #0B1120;
+            --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+            --shadow-md: 0 2px 8px rgba(16, 24, 40, 0.08);
+        }
+
         html, body, [class*="css"] {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--color-text);
         }
+
+        .stApp { background: var(--color-bg); }
 
         /* Hide default Streamlit chrome */
         #MainMenu {visibility: hidden;}
@@ -105,152 +129,228 @@ def inject_custom_css() -> None:
             max-width: 1200px;
         }
 
-        /* App header */
+        h4 {
+            font-weight: 600 !important;
+            letter-spacing: -0.01em;
+            color: var(--color-text) !important;
+        }
+
+        /* App header: solid, low-contrast chrome rather than a bright banner */
         .app-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 1.1rem 1.6rem;
-            background: linear-gradient(135deg, #4F46E5 0%, #6366F1 100%);
-            border-radius: 16px;
+            padding: 0.95rem 1.5rem;
+            background: var(--color-sidebar);
+            border-radius: 12px;
             color: #fff;
-            margin-bottom: 1.6rem;
-            box-shadow: 0 8px 24px rgba(79, 70, 229, 0.25);
+            margin-bottom: 1.75rem;
+        }
+        .app-header .title-group {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .app-header .logo-mark {
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            background: var(--color-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.05rem;
+            flex-shrink: 0;
         }
         .app-header h1 {
-            font-size: 1.35rem;
-            font-weight: 700;
+            font-size: 1.05rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
             margin: 0;
             color: #fff;
         }
         .app-header span.subtitle {
-            font-size: 0.85rem;
-            opacity: 0.85;
+            font-size: 0.8rem;
+            color: #94A3B8;
             font-weight: 400;
         }
         .app-header .badge {
-            background: rgba(255,255,255,0.18);
-            padding: 0.35rem 0.9rem;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+            padding: 0.3rem 0.85rem;
             border-radius: 999px;
-            font-size: 0.8rem;
-            font-weight: 600;
+            font-size: 0.78rem;
+            font-weight: 500;
+            color: #E2E8F0;
         }
 
         /* Cards */
         .metric-card {
-            background: #FFFFFF;
-            border: 1px solid #E5E7EB;
-            border-radius: 16px;
-            padding: 1.3rem 1.4rem;
-            box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: 10px;
+            padding: 1.15rem 1.3rem;
+            box-shadow: var(--shadow-sm);
             height: 100%;
         }
         .metric-card .rank-badge {
-            font-size: 1.8rem;
+            font-size: 1.5rem;
             line-height: 1;
         }
         .metric-card .bu-name {
-            font-size: 1.15rem;
-            font-weight: 700;
-            color: #0F172A;
-            margin: 0.4rem 0 0.15rem 0;
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: var(--color-text);
+            margin: 0.35rem 0 0.15rem 0;
         }
         .metric-card .score {
-            font-size: 1.6rem;
-            font-weight: 800;
-            color: #4F46E5;
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--color-primary);
         }
         .metric-card .label {
-            font-size: 0.78rem;
+            font-size: 0.72rem;
             font-weight: 600;
-            color: #64748B;
+            color: var(--color-text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.05em;
         }
-        .metric-card.gold { border-top: 4px solid #F59E0B; }
-        .metric-card.silver { border-top: 4px solid #94A3B8; }
+        .metric-card.gold { border-top: 3px solid #B45309; }
+        .metric-card.silver { border-top: 3px solid #64748B; }
 
         .info-card {
-            background: #FFFFFF;
-            border: 1px solid #E5E7EB;
-            border-radius: 14px;
-            padding: 1rem 1.2rem;
-            box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
-        }
-
-        .status-badge {
-            background-color: #dcfce7;
-            color: #15803d;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 0.8rem;
-            display: inline-block;
-        }
-
-        /* Buttons */
-        .stButton > button, .stDownloadButton > button {
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
             border-radius: 10px;
+            padding: 0.9rem 1.1rem;
+            box-shadow: var(--shadow-sm);
+        }
+
+        /* Status badges — color-coded by meaning, not one-size-fits-all green */
+        .status-badge {
+            padding: 3px 11px;
+            border-radius: 6px;
             font-weight: 600;
-            border: none;
-            background: linear-gradient(135deg, #4F46E5 0%, #6366F1 100%);
+            font-size: 0.75rem;
+            display: inline-block;
+            border: 1px solid transparent;
+        }
+        .status-badge.badge-green  { background: #ECFDF3; color: #027A48; border-color: #ABEFC6; }
+        .status-badge.badge-blue   { background: #EFF4FF; color: #175CD3; border-color: #B2CCFF; }
+        .status-badge.badge-amber  { background: #FFFAEB; color: #B54708; border-color: #FEDF89; }
+        .status-badge.badge-red    { background: #FEF3F2; color: #B42318; border-color: #FECDCA; }
+        .status-badge.badge-gray   { background: #F2F4F7; color: #344054; border-color: #E4E7EC; }
+
+        /* Buttons: solid, low-elevation, darken (not glow) on hover */
+        .stButton > button, .stDownloadButton > button {
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            border: 1px solid var(--color-primary);
+            background: var(--color-primary);
             color: #fff;
-            padding: 0.55rem 1.3rem;
-            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
+            padding: 0.5rem 1.2rem;
+            box-shadow: var(--shadow-sm);
+            transition: background 0.12s ease;
         }
         .stButton > button:hover, .stDownloadButton > button:hover {
-            filter: brightness(1.08);
+            background: var(--color-primary-hover);
+            border-color: var(--color-primary-hover);
             color: #fff;
         }
 
         /* File uploader */
         [data-testid="stFileUploader"] {
-            border: 2px dashed #C7D2FE;
-            border-radius: 14px;
-            padding: 0.8rem;
-            background: #F5F6FF;
+            border: 1.5px dashed var(--color-border);
+            border-radius: 10px;
+            padding: 0.75rem;
+            background: var(--color-surface);
         }
 
         /* Tables */
         [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
-            border-radius: 12px;
+            border-radius: 10px;
             overflow: hidden;
-            border: 1px solid #E5E7EB;
+            border: 1px solid var(--color-border);
+            box-shadow: var(--shadow-sm);
         }
 
         /* Login screen */
         .login-wrapper {
-            max-width: 420px;
+            max-width: 400px;
             margin: 4rem auto 0 auto;
-            background: #FFFFFF;
-            border: 1px solid #E5E7EB;
-            border-radius: 18px;
-            padding: 2.2rem 2.2rem 1.6rem 2.2rem;
-            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: 14px;
+            padding: 2.1rem 2.1rem 1.5rem 2.1rem;
+            box-shadow: var(--shadow-md);
+        }
+        .login-wrapper .logo-mark {
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            background: var(--color-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.35rem;
+            margin: 0 auto 1rem auto;
         }
         .login-wrapper h2 {
             text-align: center;
-            font-weight: 800;
-            color: #0F172A;
+            font-weight: 600;
+            font-size: 1.2rem;
+            letter-spacing: -0.01em;
+            color: var(--color-text);
             margin-bottom: 0.2rem;
         }
         .login-wrapper p.subtitle {
             text-align: center;
-            color: #64748B;
-            font-size: 0.9rem;
-            margin-bottom: 1.6rem;
+            color: var(--color-text-muted);
+            font-size: 0.85rem;
+            margin-bottom: 1.5rem;
         }
 
         [data-testid="stSidebar"] {
-            background: #0F172A;
+            background: var(--color-sidebar);
         }
         [data-testid="stSidebar"] * {
-            color: #E2E8F0 !important;
+            color: #CBD5E1 !important;
+        }
+        [data-testid="stSidebar"] .avatar-circle {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: var(--color-primary);
+            color: #fff !important;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 0.6rem;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+STATUS_BADGE_CLASSES = {
+    "Submitted": "badge-blue",
+    "Under Review": "badge-amber",
+    "Incomplete / Needs Fix": "badge-red",
+    "Approved": "badge-green",
+    "pending": "badge-amber",
+    "approved": "badge-green",
+    "rejected": "badge-red",
+    "suspended": "badge-gray",
+}
+
+
+def status_badge_html(status: str) -> str:
+    css_class = STATUS_BADGE_CLASSES.get(status, "badge-gray")
+    return f'<span class="status-badge {css_class}">{status}</span>'
 
 
 # ===========================================================================
@@ -330,6 +430,27 @@ def get_pending_users() -> pd.DataFrame:
 def update_user_status(user_id: str, status: str) -> None:
     supabase = get_supabase_client()
     supabase.table("users").update({"status": status}).eq("id", user_id).execute()
+
+
+def get_all_users() -> pd.DataFrame:
+    supabase = get_supabase_client()
+    resp = (
+        supabase.table("users")
+        .select("id, username, role, bu_name, status, created_at")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return pd.DataFrame(resp.data or [])
+
+
+def apply_user_status_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> None:
+    supabase = get_supabase_client()
+    for i in range(len(original_df)):
+        user_id = original_df.iloc[i]["id"]
+        old_status = original_df.iloc[i]["status"]
+        new_status = edited_df.iloc[i]["status"]
+        if new_status != old_status:
+            supabase.table("users").update({"status": new_status}).eq("id", user_id).execute()
 
 
 def init_session_state() -> None:
@@ -474,9 +595,12 @@ def render_app_header(subtitle: str) -> None:
     st.markdown(
         f"""
         <div class="app-header">
-            <div>
-                <h1>\U0001F4CA BU Report Submission &amp; Tracking</h1>
-                <span class="subtitle">{subtitle}</span>
+            <div class="title-group">
+                <div class="logo-mark">\U0001F4CA</div>
+                <div>
+                    <h1>BU Report Submission &amp; Tracking</h1>
+                    <span class="subtitle">{subtitle}</span>
+                </div>
             </div>
             <div class="badge">{role_label}</div>
         </div>
@@ -487,12 +611,16 @@ def render_app_header(subtitle: str) -> None:
 
 def render_sidebar() -> None:
     with st.sidebar:
-        st.markdown("### \U0001F464 Account")
-        st.write(f"**User:** {st.session_state.get('username')}")
-        st.write(f"**Role:** {st.session_state.get('role')}")
+        username = st.session_state.get("username") or ""
+        initials = username[:2].upper() if username else "?"
+        st.markdown(f'<div class="avatar-circle">{initials}</div>', unsafe_allow_html=True)
+        st.markdown("**Account**")
+        st.caption(f"{st.session_state.get('username')} · {st.session_state.get('role')}")
         if st.session_state.get("bu_name"):
-            st.write(f"**BU:** {st.session_state.get('bu_name')}")
+            st.caption(f"Business Unit: {st.session_state.get('bu_name')}")
         st.divider()
+        if st.button("\U0001F504 Refresh", use_container_width=True):
+            st.rerun()
         if st.button("Log out", use_container_width=True):
             logout()
 
@@ -502,7 +630,8 @@ def render_sidebar() -> None:
 # ===========================================================================
 def render_login() -> None:
     st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
-    st.markdown("<h2>\U0001F4CA BU Report Tracker</h2>", unsafe_allow_html=True)
+    st.markdown('<div class="logo-mark">\U0001F4CA</div>', unsafe_allow_html=True)
+    st.markdown("<h2>BU Report Tracker</h2>", unsafe_allow_html=True)
     st.markdown('<p class="subtitle">Sign in to submit or review monthly reports</p>', unsafe_allow_html=True)
 
     login_tab, register_tab = st.tabs(["Log in", "Register"])
@@ -525,6 +654,8 @@ def render_login() -> None:
                     st.warning("Your registration is awaiting admin approval. Please check back later.")
                 elif user["status"] == "rejected":
                     st.error("Your registration was rejected. Please contact your admin.")
+                elif user["status"] == "suspended":
+                    st.error("Your account has been suspended. Please contact your admin.")
                 else:
                     st.session_state["authenticated"] = True
                     st.session_state["role"] = user["role"]
@@ -603,7 +734,7 @@ def render_bu_dashboard() -> None:
                 <div class="metric-card">
                     <div class="label">Uploaded File Details</div>
                     <div class="bu-name">{existing['file_name']}</div>
-                    <span class="status-badge">{existing['status']}</span>
+                    {status_badge_html(existing['status'])}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -672,19 +803,63 @@ def render_pending_approvals() -> None:
                 st.rerun()
 
 
-def render_admin_month_table(month: str) -> None:
+def render_user_management() -> None:
+    st.markdown("#### \U0001F465 User Management")
+    users_df = get_all_users()
+
+    if users_df.empty:
+        st.caption("No users yet.")
+        return
+
+    editable_df = users_df[["username", "role", "bu_name", "status", "created_at"]].copy()
+
+    edited_df = st.data_editor(
+        editable_df,
+        column_config={
+            "username": st.column_config.TextColumn("Username", disabled=True),
+            "role": st.column_config.TextColumn("Role", disabled=True),
+            "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
+            "status": st.column_config.SelectboxColumn("Status", options=USER_STATUS_OPTIONS),
+            "created_at": st.column_config.TextColumn("Registered At", disabled=True),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key="user_management_editor",
+    )
+
+    if st.button("Apply User Changes", key="apply_user_changes", use_container_width=True):
+        try:
+            apply_user_status_changes(users_df, edited_df)
+            st.success("User accounts updated.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not apply changes: {exc}")
+
+
+def render_admin_month_table(month: str, bu_filter: str) -> None:
     submissions = get_submissions_for_month(month)
+    if bu_filter != "All Business Units":
+        submissions = [s for s in submissions if s["bu_name"] == bu_filter]
+
     if not submissions:
-        st.caption("No submissions for this month.")
+        st.caption("No submissions match this filter.")
         return
 
     original_df = pd.DataFrame(submissions)
     editable_df = original_df[["submission_order", "bu_name", "file_name", "status", "created_at"]].copy()
 
+    # Reordering rank only makes sense against the full month's field of
+    # submissions -- when narrowed to a single BU, lock rank editing so a
+    # single-row "renumber" doesn't clobber that BU's true cross-BU rank.
+    rank_editable = bu_filter == "All Business Units"
+    if not rank_editable:
+        st.caption("Switch the Business Unit filter to \"All Business Units\" to re-rank submissions against each other.")
+
     edited_df = st.data_editor(
         editable_df,
         column_config={
-            "submission_order": st.column_config.NumberColumn("Rank", min_value=1, step=1),
+            "submission_order": st.column_config.NumberColumn("Rank", min_value=1, step=1, disabled=not rank_editable),
             "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
             "file_name": st.column_config.TextColumn("File", disabled=True),
             "status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS),
@@ -693,14 +868,14 @@ def render_admin_month_table(month: str) -> None:
         hide_index=True,
         use_container_width=True,
         num_rows="fixed",
-        key=f"editor_{month}",
+        key=f"editor_{month}_{bu_filter}",
     )
 
     with st.expander("View / download original files"):
         for s in submissions:
             st.markdown(f"- **{s['bu_name']}** — [{s['file_name']}]({s['file_url']})")
 
-    if st.button("Apply Changes", key=f"apply_{month}", use_container_width=True):
+    if st.button("Apply Changes", key=f"apply_{month}_{bu_filter}", use_container_width=True):
         try:
             apply_admin_overrides(original_df, edited_df)
             st.success("Changes applied.")
@@ -714,13 +889,22 @@ def render_admin_dashboard() -> None:
 
     render_pending_approvals()
     st.divider()
+    render_user_management()
+    st.divider()
 
     months = get_available_months()
     if not months:
         st.info("No submissions have been made yet.")
         return
 
-    selected_month = st.selectbox("Reporting month", months, index=0)
+    col_month, col_bu = st.columns(2)
+    with col_month:
+        selected_month = st.selectbox("Reporting month", months, index=0)
+    with col_bu:
+        bu_options = ["All Business Units"] + sorted(
+            {s["bu_name"] for s in get_submissions_for_month(selected_month)}
+        )
+        selected_bu = st.selectbox("Business unit", bu_options, index=0)
 
     st.markdown("#### \U0001F3C6 Top Submissions")
     top_submissions = get_submissions_for_month(selected_month)
@@ -742,14 +926,14 @@ def render_admin_dashboard() -> None:
                         <div class="label">Rank {rank}</div>
                         <div class="rank-badge">{medal}</div>
                         <div class="bu-name">{match['bu_name']}</div>
-                        <span class="status-badge">{match['status']}</span>
+                        {status_badge_html(match['status'])}
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
     st.markdown("#### \U0001F4CB Submissions & Ranking Overrides")
-    render_admin_month_table(selected_month)
+    render_admin_month_table(selected_month, selected_bu)
 
 
 # ===========================================================================
