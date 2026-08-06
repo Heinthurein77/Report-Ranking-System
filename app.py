@@ -259,8 +259,8 @@ def inject_custom_css() -> None:
 @st.cache_resource(show_spinner=False)
 def get_supabase_client() -> Client:
     try:
-        url = st.secrets["supabase"]["url"]
-        key = st.secrets["supabase"]["key"]
+        url = st.secrets["supabase"]["SUPABASE_URL"]
+        key = st.secrets["supabase"]["SUPABASE_KEY"]
     except KeyError:
         st.error("Supabase credentials are missing from st.secrets. Please configure `[supabase]` in secrets.toml.")
         st.stop()
