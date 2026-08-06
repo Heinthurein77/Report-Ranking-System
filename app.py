@@ -1,12 +1,14 @@
 """
-BU Monthly Performance & Ranking System
-----------------------------------------
+BU Flexible Report Submission & Tracking System
+------------------------------------------------
 Single-file Streamlit app deployed on Streamlit Community Cloud.
 
 Stack:
-- Auth + data: Supabase (users, bu_submissions, rankings tables)
+- Auth + data: Supabase (users, bu_submissions tables)
 - File storage: Google Drive (GCP service account)
-- Processing: pandas (reads uploaded .xlsx, computes achievement rankings)
+- Ranking: submission ARRIVAL ORDER for the month (no Excel content is parsed
+  or validated -- files are accepted and stored as-is). Admin can manually
+  override rank/status afterwards.
 
 Required Supabase schema (create these tables before running the app):
 
@@ -20,6 +22,20 @@ Required Supabase schema (create these tables before running the app):
         created_at timestamptz default now()
     );
 
+    create table bu_submissions (
+        id uuid primary key default gen_random_uuid(),
+        bu_name text not null,
+        submission_month text not null,        -- 'YYYY-MM'
+        submission_order int not null,         -- immutable arrival sequence (1st, 2nd, ...)
+        rank int not null,                     -- current effective rank; admin-editable
+        file_name text not null,
+        drive_file_id text not null,
+        drive_link text not null,
+        status text not null check (status in ('Submitted', 'Pending Review', 'Rejected', 'Incomplete')) default 'Submitted',
+        uploaded_by text not null,
+        created_at timestamptz default now()
+    );
+
 -- The admin account is seeded manually (self-registration always creates a
 -- 'bu_user' pending account) -- insert one row directly with role='admin'
 -- and status='approved':
@@ -29,36 +45,10 @@ Required Supabase schema (create these tables before running the app):
 --
 -- New users self-register as role='bu_user', status='pending', and cannot
 -- log in until an admin approves them from the Admin Dashboard.
-
-    create table bu_submissions (
-        id uuid primary key default gen_random_uuid(),
-        bu_name text not null,
-        period text not null,              -- 'YYYY-MM'
-        filename text not null,
-        drive_file_id text not null,
-        drive_file_link text not null,
-        achievement_score numeric not null,
-        uploaded_by text not null,
-        uploaded_at timestamptz default now()
-    );
-
-    create table rankings (
-        id uuid primary key default gen_random_uuid(),
-        submission_id uuid references bu_submissions(id),
-        bu_name text not null,
-        period text not null,
-        achievement_score numeric not null,
-        rank int not null,
-        updated_at timestamptz default now(),
-        unique (bu_name, period)
-    );
-
-To create a user, hash a password locally and insert a row into `users`:
-    python -c "import bcrypt; print(bcrypt.hashpw(b'YourPassword123', bcrypt.gensalt()).decode())"
 """
 
 import io
-from datetime import datetime, date
+from datetime import date
 from typing import Optional
 
 import pandas as pd
@@ -73,27 +63,23 @@ import bcrypt
 # Page config & constants
 # ===========================================================================
 st.set_page_config(
-    page_title="BU Performance & Ranking System",
+    page_title="BU Report Submission & Tracking",
     page_icon="\U0001F4CA",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
-EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MAX_UPLOAD_MB = 15
 
-# Column names (case-insensitive) accepted as the "achievement score" for a BU.
-ACHIEVEMENT_COLUMN_CANDIDATES = [
-    "achievement %",
-    "achievement(%)",
-    "achievement",
-    "achievement score",
-    "score",
-    "performance %",
-]
-
+STATUS_OPTIONS = ["Submitted", "Pending Review", "Rejected", "Incomplete"]
 RANK_MEDALS = {1: "\U0001F947", 2: "\U0001F948", 3: "\U0001F949"}
+
+
+def get_mime_type(filename: str) -> str:
+    if filename.lower().endswith(".xls"):
+        return "application/vnd.ms-excel"
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 # ===========================================================================
@@ -220,7 +206,7 @@ def inject_custom_css() -> None:
         }
 
         /* Tables */
-        [data-testid="stDataFrame"] {
+        [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
             border-radius: 12px;
             overflow: hidden;
             border: 1px solid #E5E7EB;
@@ -380,7 +366,7 @@ def upload_file_to_drive(file_bytes: bytes, filename: str) -> dict:
         raise RuntimeError("GOOGLE_DRIVE_FOLDER_ID is missing from st.secrets.")
 
     file_metadata = {"name": filename, "parents": [folder_id]}
-    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=EXCEL_MIME_TYPE, resumable=True)
+    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=get_mime_type(filename), resumable=True)
 
     created = (
         service.files()
@@ -391,69 +377,30 @@ def upload_file_to_drive(file_bytes: bytes, filename: str) -> dict:
 
 
 # ===========================================================================
-# Excel processing
+# Supabase data helpers — submissions
 # ===========================================================================
-def extract_achievement_score(df: pd.DataFrame) -> float:
-    normalized_cols = {str(c).strip().lower(): c for c in df.columns}
-
-    for candidate in ACHIEVEMENT_COLUMN_CANDIDATES:
-        if candidate in normalized_cols:
-            col = normalized_cols[candidate]
-            series = pd.to_numeric(df[col], errors="coerce").dropna()
-            if not series.empty:
-                return float(series.mean())
-
-    raise ValueError(
-        "Could not find an achievement/score column in the uploaded file. "
-        "Expected a column named one of: " + ", ".join(ACHIEVEMENT_COLUMN_CANDIDATES)
-    )
-
-
-# ===========================================================================
-# Supabase data helpers
-# ===========================================================================
-def save_submission(bu_name: str, period: str, filename: str, drive_file: dict, score: float, uploaded_by: str) -> dict:
+def get_next_submission_order(month: str) -> int:
     supabase = get_supabase_client()
+    resp = supabase.table("bu_submissions").select("id", count="exact").eq("submission_month", month).execute()
+    return (resp.count or 0) + 1
+
+
+def create_submission(bu_name: str, month: str, filename: str, drive_file: dict, uploaded_by: str) -> dict:
+    supabase = get_supabase_client()
+    order = get_next_submission_order(month)
     record = {
         "bu_name": bu_name,
-        "period": period,
-        "filename": filename,
+        "submission_month": month,
+        "submission_order": order,
+        "rank": order,
+        "file_name": filename,
         "drive_file_id": drive_file["id"],
-        "drive_file_link": drive_file.get("webViewLink", ""),
-        "achievement_score": score,
+        "drive_link": drive_file.get("webViewLink", ""),
+        "status": "Submitted",
         "uploaded_by": uploaded_by,
     }
     resp = supabase.table("bu_submissions").insert(record).execute()
     return resp.data[0]
-
-
-def recompute_rankings(period: str) -> list:
-    """Recalculate 1st/2nd/... rank for every BU's latest submission in a period."""
-    supabase = get_supabase_client()
-    resp = supabase.table("bu_submissions").select("*").eq("period", period).execute()
-    submissions = resp.data or []
-
-    latest_by_bu = {}
-    for s in submissions:
-        bu = s["bu_name"]
-        if bu not in latest_by_bu or s["uploaded_at"] > latest_by_bu[bu]["uploaded_at"]:
-            latest_by_bu[bu] = s
-
-    ranked = sorted(latest_by_bu.values(), key=lambda x: x["achievement_score"], reverse=True)
-
-    for idx, row in enumerate(ranked, start=1):
-        supabase.table("rankings").upsert(
-            {
-                "submission_id": row["id"],
-                "bu_name": row["bu_name"],
-                "period": period,
-                "achievement_score": row["achievement_score"],
-                "rank": idx,
-            },
-            on_conflict="bu_name,period",
-        ).execute()
-
-    return ranked
 
 
 def get_submissions_for_bu(bu_name: str) -> pd.DataFrame:
@@ -462,35 +409,51 @@ def get_submissions_for_bu(bu_name: str) -> pd.DataFrame:
         supabase.table("bu_submissions")
         .select("*")
         .eq("bu_name", bu_name)
-        .order("uploaded_at", desc=True)
+        .order("created_at", desc=True)
         .execute()
     )
     return pd.DataFrame(resp.data or [])
 
 
-def get_all_submissions() -> pd.DataFrame:
+def get_submissions_for_month(month: str) -> list:
     supabase = get_supabase_client()
-    resp = supabase.table("bu_submissions").select("*").order("uploaded_at", desc=True).execute()
-    return pd.DataFrame(resp.data or [])
+    resp = (
+        supabase.table("bu_submissions")
+        .select("*")
+        .eq("submission_month", month)
+        .order("rank")
+        .execute()
+    )
+    return resp.data or []
 
 
-def get_rankings_for_period(period: str) -> pd.DataFrame:
+def get_available_months() -> list:
     supabase = get_supabase_client()
-    resp = supabase.table("rankings").select("*").eq("period", period).order("rank").execute()
-    return pd.DataFrame(resp.data or [])
+    resp = supabase.table("bu_submissions").select("submission_month").execute()
+    months = sorted({row["submission_month"] for row in (resp.data or [])}, reverse=True)
+    return months
 
 
-def get_all_rankings() -> pd.DataFrame:
+def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> None:
+    """Persist admin edits made in the data editor: status changes are applied
+    directly; rank changes are resolved into a strict 1..N ordering (ties
+    broken by original row order), which naturally shifts every other BU's
+    rank when one submission is moved up or down."""
     supabase = get_supabase_client()
-    resp = supabase.table("rankings").select("*").order("period", desc=True).order("rank").execute()
-    return pd.DataFrame(resp.data or [])
 
+    for i in range(len(original_df)):
+        sub_id = original_df.iloc[i]["id"]
+        old_status = original_df.iloc[i]["status"]
+        new_status = edited_df.iloc[i]["status"]
+        if new_status != old_status:
+            supabase.table("bu_submissions").update({"status": new_status}).eq("id", sub_id).execute()
 
-def get_available_periods() -> list:
-    df = get_all_submissions()
-    if df.empty:
-        return []
-    return sorted(df["period"].unique().tolist(), reverse=True)
+    requested = [(i, original_df.iloc[i]["id"], edited_df.iloc[i]["rank"]) for i in range(len(original_df))]
+    requested_sorted = sorted(requested, key=lambda t: (t[2], t[0]))
+
+    for new_rank, (orig_idx, sub_id, _) in enumerate(requested_sorted, start=1):
+        if new_rank != original_df.iloc[orig_idx]["rank"]:
+            supabase.table("bu_submissions").update({"rank": new_rank}).eq("id", sub_id).execute()
 
 
 # ===========================================================================
@@ -502,7 +465,7 @@ def render_app_header(subtitle: str) -> None:
         f"""
         <div class="app-header">
             <div>
-                <h1>\U0001F4CA BU Monthly Performance &amp; Ranking System</h1>
+                <h1>\U0001F4CA BU Report Submission &amp; Tracking</h1>
                 <span class="subtitle">{subtitle}</span>
             </div>
             <div class="badge">{role_label}</div>
@@ -524,40 +487,13 @@ def render_sidebar() -> None:
             logout()
 
 
-def render_rank_card(row: Optional[dict], label: str, css_class: str) -> None:
-    if row is None:
-        st.markdown(
-            f"""
-            <div class="metric-card {css_class}">
-                <div class="label">{label}</div>
-                <div class="bu-name">No data yet</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    medal = RANK_MEDALS.get(int(row["rank"]), "\U0001F3C5")
-    st.markdown(
-        f"""
-        <div class="metric-card {css_class}">
-            <div class="label">{label}</div>
-            <div class="rank-badge">{medal}</div>
-            <div class="bu-name">{row['bu_name']}</div>
-            <div class="score">{row['achievement_score']:.2f}%</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 # ===========================================================================
 # UI: Login page
 # ===========================================================================
 def render_login() -> None:
     st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
-    st.markdown("<h2>\U0001F4CA BU Ranking System</h2>", unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Sign in to submit or review monthly performance</p>', unsafe_allow_html=True)
+    st.markdown("<h2>\U0001F4CA BU Report Tracker</h2>", unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Sign in to submit or review monthly reports</p>', unsafe_allow_html=True)
 
     login_tab, register_tab = st.tabs(["Log in", "Register"])
 
@@ -619,8 +555,24 @@ def render_login() -> None:
 # ===========================================================================
 # UI: BU user dashboard
 # ===========================================================================
+def render_submission_success(order: int, rank: int, drive_link: str) -> None:
+    medal = RANK_MEDALS.get(rank, "\U0001F3C5")
+    st.markdown(
+        f"""
+        <div class="metric-card gold">
+            <div class="label">Submission Confirmed</div>
+            <div class="rank-badge">{medal}</div>
+            <div class="bu-name">You are Submission #{order} (Rank {rank}) for this month!</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if drive_link:
+        st.markdown(f"[\U0001F4C2 View your file on Google Drive]({drive_link})")
+
+
 def render_bu_dashboard() -> None:
-    render_app_header("Upload your month-end report and track your ranking")
+    render_app_header("Upload your month-end report")
     bu_name = st.session_state["bu_name"]
 
     if not bu_name:
@@ -630,83 +582,60 @@ def render_bu_dashboard() -> None:
     col_upload, col_status = st.columns([1.4, 1])
 
     with col_upload:
-        st.markdown("#### \U0001F4E4 Submit Month-End Report")
-        today = date.today()
-        period_choice = st.date_input("Reporting month", value=today.replace(day=1))
-        period = period_choice.strftime("%Y-%m")
+        st.markdown("#### \U0001F4E4 Submit Report")
+        period_choice = st.date_input("Reporting month", value=date.today().replace(day=1))
+        month = period_choice.strftime("%Y-%m")
 
-        uploaded_file = st.file_uploader("Upload Excel report (.xlsx)", type=["xlsx"])
+        uploaded_file = st.file_uploader("Upload report (.xlsx or .xls) — any format accepted", type=["xlsx", "xls"])
 
         if uploaded_file is not None:
             size_mb = uploaded_file.size / (1024 * 1024)
             if size_mb > MAX_UPLOAD_MB:
                 st.error(f"File is {size_mb:.1f} MB, which exceeds the {MAX_UPLOAD_MB} MB limit.")
-                return
+            else:
+                st.caption(f"Ready to submit: **{uploaded_file.name}** ({size_mb:.2f} MB)")
+                if st.button("Submit Report", use_container_width=True):
+                    try:
+                        file_bytes = uploaded_file.getvalue()
 
-            file_bytes = uploaded_file.getvalue()
+                        with st.spinner("Uploading to Google Drive..."):
+                            drive_file = upload_file_to_drive(file_bytes, uploaded_file.name)
 
-            try:
-                df_preview = pd.read_excel(io.BytesIO(file_bytes))
-            except Exception as exc:
-                st.error(f"Could not read the Excel file: {exc}")
-                return
+                        with st.spinner("Saving submission..."):
+                            submission = create_submission(
+                                bu_name, month, uploaded_file.name, drive_file, st.session_state["username"]
+                            )
 
-            st.markdown("**Preview**")
-            st.dataframe(df_preview.head(10), use_container_width=True)
-
-            try:
-                score = extract_achievement_score(df_preview)
-            except ValueError as exc:
-                st.error(str(exc))
-                return
-
-            st.info(f"Calculated achievement score for **{period}**: **{score:.2f}%**")
-
-            if st.button("Submit Report", use_container_width=True):
-                try:
-                    with st.spinner("Uploading to Google Drive..."):
-                        drive_file = upload_file_to_drive(file_bytes, uploaded_file.name)
-
-                    with st.spinner("Saving submission..."):
-                        save_submission(bu_name, period, uploaded_file.name, drive_file, score, st.session_state["username"])
-                        recompute_rankings(period)
-
-                    st.success("Report submitted successfully!")
-                    link = drive_file.get("webViewLink", "")
-                    if link:
-                        st.markdown(f"[\U0001F4C2 View uploaded file on Google Drive]({link})")
-                except Exception as exc:
-                    st.error(f"Submission failed: {exc}")
+                        st.success("Report submitted successfully!")
+                        render_submission_success(
+                            submission["submission_order"], submission["rank"], submission["drive_link"]
+                        )
+                    except Exception as exc:
+                        st.error(f"Submission failed: {exc}")
 
     with col_status:
-        st.markdown("#### \U0001F3C6 Current Standing")
-        rankings_df = get_rankings_for_period(period)
-        if rankings_df.empty:
-            st.markdown('<div class="info-card">No rankings published for this period yet.</div>', unsafe_allow_html=True)
+        st.markdown("#### \U0001F4CB This Month's Order")
+        month_submissions = get_submissions_for_month(month)
+        if not month_submissions:
+            st.markdown('<div class="info-card">No submissions for this period yet.</div>', unsafe_allow_html=True)
         else:
-            my_row = rankings_df[rankings_df["bu_name"] == bu_name]
-            if my_row.empty:
-                st.markdown('<div class="info-card">You have not submitted for this period yet.</div>', unsafe_allow_html=True)
-            else:
-                row = my_row.iloc[0]
-                medal = RANK_MEDALS.get(int(row["rank"]), "\U0001F3C5")
-                st.markdown(
-                    f"""
-                    <div class="metric-card">
-                        <div class="label">Your Rank ({period})</div>
-                        <div class="rank-badge">{medal} #{int(row['rank'])}</div>
-                        <div class="score">{row['achievement_score']:.2f}%</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            rows = [
+                {
+                    "Rank": s["rank"],
+                    "BU": s["bu_name"],
+                    "Status": s["status"],
+                    "You": "✅" if s["bu_name"] == bu_name else "",
+                }
+                for s in month_submissions
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    st.markdown("#### \U0001F4DC Submission History")
+    st.markdown("#### \U0001F4DC Your Submission History")
     history_df = get_submissions_for_bu(bu_name)
     if history_df.empty:
         st.caption("No submissions yet.")
     else:
-        display_cols = ["period", "filename", "achievement_score", "uploaded_at", "drive_file_link"]
+        display_cols = ["submission_month", "file_name", "submission_order", "rank", "status", "created_at", "drive_link"]
         display_cols = [c for c in display_cols if c in history_df.columns]
         st.dataframe(history_df[display_cols], use_container_width=True, hide_index=True)
 
@@ -740,60 +669,85 @@ def render_pending_approvals() -> None:
                 st.rerun()
 
 
+def render_admin_month_table(month: str) -> None:
+    submissions = get_submissions_for_month(month)
+    if not submissions:
+        st.caption("No submissions for this month.")
+        return
+
+    original_df = pd.DataFrame(submissions)
+    editable_df = original_df[["rank", "bu_name", "file_name", "status", "submission_order", "created_at"]].copy()
+
+    edited_df = st.data_editor(
+        editable_df,
+        column_config={
+            "rank": st.column_config.NumberColumn("Rank", min_value=1, step=1),
+            "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
+            "file_name": st.column_config.TextColumn("File", disabled=True),
+            "status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS),
+            "submission_order": st.column_config.NumberColumn("Original Order", disabled=True),
+            "created_at": st.column_config.TextColumn("Submitted At", disabled=True),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key=f"editor_{month}",
+    )
+
+    with st.expander("View original files on Google Drive"):
+        for s in submissions:
+            st.markdown(f"- **{s['bu_name']}** — [{s['file_name']}]({s['drive_link']})")
+
+    if st.button("Apply Changes", key=f"apply_{month}", use_container_width=True):
+        try:
+            apply_admin_overrides(original_df, edited_df)
+            st.success("Changes applied.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not apply changes: {exc}")
+
+
 def render_admin_dashboard() -> None:
-    render_app_header("Monitor submissions and BU rankings across the organization")
+    render_app_header("Review submissions and manage rankings")
 
     render_pending_approvals()
     st.divider()
 
-    periods = get_available_periods()
-    if not periods:
+    months = get_available_months()
+    if not months:
         st.info("No submissions have been made yet.")
         return
 
-    selected_period = st.selectbox("Reporting period", periods, index=0)
+    selected_month = st.selectbox("Reporting month", months, index=0)
 
-    rankings_df = get_rankings_for_period(selected_period)
-
-    st.markdown("#### \U0001F3C6 Top Performers")
+    st.markdown("#### \U0001F3C6 Top Submissions")
+    top_submissions = get_submissions_for_month(selected_month)
     col1, col2 = st.columns(2)
-    with col1:
-        top1 = rankings_df.iloc[0].to_dict() if not rankings_df.empty and len(rankings_df) >= 1 else None
-        render_rank_card(top1, "1st Rank", "gold")
-    with col2:
-        top2 = rankings_df.iloc[1].to_dict() if not rankings_df.empty and len(rankings_df) >= 2 else None
-        render_rank_card(top2, "2nd Rank", "silver")
+    for col, rank in ((col1, 1), (col2, 2)):
+        match = next((s for s in top_submissions if s["rank"] == rank), None)
+        with col:
+            if match is None:
+                st.markdown(
+                    f"""<div class="metric-card"><div class="label">Rank {rank}</div><div class="bu-name">No data</div></div>""",
+                    unsafe_allow_html=True,
+                )
+            else:
+                medal = RANK_MEDALS.get(rank, "\U0001F3C5")
+                css_class = "gold" if rank == 1 else "silver"
+                st.markdown(
+                    f"""
+                    <div class="metric-card {css_class}">
+                        <div class="label">Rank {rank}</div>
+                        <div class="rank-badge">{medal}</div>
+                        <div class="bu-name">{match['bu_name']}</div>
+                        <div class="score">{match['status']}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-    st.markdown("#### \U0001F4CB Full Ranking Table")
-    if rankings_df.empty:
-        st.caption("No rankings for this period.")
-    else:
-        display_df = rankings_df[["rank", "bu_name", "achievement_score", "updated_at"]].copy()
-        display_df.columns = ["Rank", "Business Unit", "Achievement %", "Last Updated"]
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    st.markdown("#### \U0001F4E5 All Submissions")
-    all_submissions_df = get_all_submissions()
-    if all_submissions_df.empty:
-        st.caption("No submissions recorded yet.")
-    else:
-        display_cols = ["bu_name", "period", "filename", "achievement_score", "uploaded_by", "uploaded_at", "drive_file_link"]
-        display_cols = [c for c in display_cols if c in all_submissions_df.columns]
-        st.dataframe(all_submissions_df[display_cols], use_container_width=True, hide_index=True)
-
-    st.markdown("#### \U0001F4E4 Master Ranking Report")
-    all_rankings_df = get_all_rankings()
-    if all_rankings_df.empty:
-        st.caption("Nothing to export yet.")
-    else:
-        csv_bytes = all_rankings_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download Master Ranking Report (CSV)",
-            data=csv_bytes,
-            file_name=f"master_ranking_report_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+    st.markdown("#### \U0001F4CB Submissions & Ranking Overrides")
+    render_admin_month_table(selected_month)
 
 
 # ===========================================================================
