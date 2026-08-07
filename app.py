@@ -134,6 +134,19 @@ def render_sidebar() -> None:
             st.rerun()
 
 
+def render_dashboard_header(title: str) -> None:
+    """Title + an explicit refresh button inside the dashboard body itself
+    (in addition to the one already in the sidebar), so re-fetching the
+    latest data doesn't require hunting for it."""
+    col_title, col_refresh = st.columns([5, 1])
+    with col_title:
+        st.markdown(f"## {title}")
+    with col_refresh:
+        st.write("")
+        if st.button("\U0001F504 Refresh", key=f"refresh_{title}", use_container_width=True):
+            st.rerun()
+
+
 def render_deadline_countdown_value(month_year: str) -> tuple:
     """Returns (value_text, variant) for the deadline KPI card."""
     now = ranking.now_mmt()
@@ -166,7 +179,7 @@ def render_bu_dashboard() -> None:
     month_year = date.today().strftime("%Y-%m")
     month_label = date.today().strftime("%B %Y")
 
-    st.markdown(f"## \U0001F4E4 Submit {month_label} Report")
+    render_dashboard_header(f"\U0001F4E4 Submit {month_label} Report")
 
     countdown_value, countdown_variant = render_deadline_countdown_value(month_year)
     st.markdown(metric_card_html("Deadline (14th, MMT)", countdown_value, "", countdown_variant), unsafe_allow_html=True)
@@ -255,7 +268,11 @@ def render_ranking_tab(all_bus_df: pd.DataFrame, month_year: str) -> None:
     st.caption("Edit rank or status for any BU below, then Save Changes.")
 
     editable_df = submitted_df[["id", "bu_name", "rank", "status"]].copy()
-    editable_df["rank"] = editable_df["rank"].astype(int)
+    # A report can end up with no rank (e.g. legacy data from before ranks
+    # were assigned at insert time) -- .astype(int) crashes on NaN, so any
+    # missing rank is pushed to the bottom instead of erroring the whole tab.
+    fallback_rank = int(editable_df["rank"].max()) + 1 if editable_df["rank"].notna().any() else 1
+    editable_df["rank"] = editable_df["rank"].fillna(fallback_rank).astype(int)
     edited_df = st.data_editor(
         editable_df,
         column_config={
@@ -365,7 +382,7 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
 
 
 def render_admin_dashboard() -> None:
-    st.markdown("## \U0001F4CA Admin Dashboard")
+    render_dashboard_header("\U0001F4CA Admin Dashboard")
 
     all_bus_df = db.get_business_units()
     months = db.get_available_months()
