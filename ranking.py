@@ -33,22 +33,28 @@ def today_mmt() -> date:
     return now_mmt().date()
 
 
-def parse_to_mmt(timestamp: Optional[str]) -> Optional[datetime]:
+def parse_to_mmt(timestamp) -> Optional[datetime]:
     """Parse a Supabase timestamptz string (stored in UTC) and convert to
     Myanmar time. Every report/account timestamp in the UI should go
-    through this before being shown -- Supabase always returns UTC."""
-    if not timestamp:
+    through this before being shown -- Supabase always returns UTC.
+
+    Deliberately not type-hinted as `str`: this is fed directly from
+    pandas columns (e.g. a left-joined "no report yet" row), where a
+    missing value shows up as float NaN -- which is truthy in Python, so
+    `if not timestamp` alone doesn't catch it, and datetime.fromisoformat
+    raises TypeError (not ValueError) on a non-string input."""
+    if not isinstance(timestamp, str) or not timestamp:
         return None
     try:
         dt = datetime.fromisoformat(timestamp)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(MYANMAR_TZ)
 
 
-def format_mmt(timestamp: Optional[str], fmt: str = "%Y-%m-%d %H:%M") -> str:
+def format_mmt(timestamp, fmt: str = "%Y-%m-%d %H:%M") -> str:
     dt = parse_to_mmt(timestamp)
     return dt.strftime(fmt) if dt else ""
 
