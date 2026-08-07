@@ -92,6 +92,78 @@ def inject_custom_css() -> None:
             color: var(--color-text) !important;
         }
 
+        /* Section headers: a consistent, bordered header bar for every
+           dashboard section instead of a bare markdown heading */
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 0.55rem;
+            margin: 0.4rem 0 1rem 0;
+            border-bottom: 1px solid var(--color-border);
+        }
+        .section-header .section-title {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--color-text);
+        }
+        .section-header .section-icon {
+            width: 26px;
+            height: 26px;
+            border-radius: 7px;
+            background: #EEF2FF;
+            color: var(--color-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+        .section-header .section-meta {
+            font-size: 0.78rem;
+            color: var(--color-text-muted);
+            font-weight: 500;
+        }
+
+        /* Compact stat tiles (BU dashboard summary row) */
+        .stat-tile {
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: 10px;
+            padding: 0.9rem 1.1rem;
+            box-shadow: var(--shadow-sm);
+        }
+        .stat-tile .stat-label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--color-text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .stat-tile .stat-value {
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: var(--color-text);
+            margin-top: 0.25rem;
+        }
+        .stat-tile .stat-value.accent { color: var(--color-primary); }
+        .stat-tile .stat-value.warn { color: #B54708; }
+        .stat-tile .stat-value.danger { color: #B42318; }
+
+        /* Empty state */
+        .empty-state {
+            background: var(--color-surface);
+            border: 1px dashed var(--color-border);
+            border-radius: 10px;
+            padding: 1.5rem;
+            text-align: center;
+            color: var(--color-text-muted);
+            font-size: 0.85rem;
+        }
+
         /* App header: solid, low-contrast chrome rather than a bright banner */
         .app-header {
             display: flex;
@@ -662,6 +734,55 @@ def render_app_header(subtitle: str) -> None:
     )
 
 
+def render_section_header(icon: str, title: str, meta: str = "") -> None:
+    meta_html = f'<span class="section-meta">{meta}</span>' if meta else ""
+    st.markdown(
+        f"""
+        <div class="section-header">
+            <div class="section-title"><span class="section-icon">{icon}</span>{title}</div>
+            {meta_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_stat_tile(label: str, value: str, accent: str = "") -> None:
+    css_class = f"stat-value {accent}".strip()
+    st.markdown(
+        f"""
+        <div class="stat-tile">
+            <div class="stat-label">{label}</div>
+            <div class="{css_class}">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_empty_state(message: str) -> None:
+    st.markdown(f'<div class="empty-state">{message}</div>', unsafe_allow_html=True)
+
+
+DISPLAY_COLUMN_LABELS = {
+    "submission_month": "Month",
+    "bu_name": "Business Unit",
+    "file_name": "File",
+    "submission_order": "Rank",
+    "status": "Status",
+    "uploaded_by": "Uploaded By",
+    "created_at": "Submitted At",
+    "file_url": "File Link",
+}
+
+
+def format_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "created_at" in df.columns:
+        df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+    return df.rename(columns=DISPLAY_COLUMN_LABELS)
+
+
 def render_sidebar() -> None:
     with st.sidebar:
         username = st.session_state.get("username") or ""
@@ -761,13 +882,29 @@ def render_bu_dashboard() -> None:
     today = date.today()
     month = today.strftime("%Y-%m")
     month_label = today.strftime("%B %Y")
-
-    st.markdown(f"#### \U0001F4C5 Period: {month_label}")
+    days_remaining = DEADLINE_DAY_OF_MONTH - today.day
 
     existing = get_submission_for_bu_month(bu_name, month)
+    history_df = get_submissions_for_bu(bu_name)
+
+    stat_col1, stat_col2, stat_col3 = st.columns(3)
+    with stat_col1:
+        rank_value = f"#{existing['submission_order']}" if existing else "—"
+        render_stat_tile("Current Rank", rank_value, "accent" if existing else "")
+    with stat_col2:
+        if existing:
+            deadline_value, deadline_accent = "Submitted", "accent"
+        elif days_remaining > 0:
+            deadline_value, deadline_accent = f"{days_remaining}d left", "warn"
+        else:
+            deadline_value, deadline_accent = "Passed", "danger"
+        render_stat_tile("This Month's Deadline", deadline_value, deadline_accent)
+    with stat_col3:
+        render_stat_tile("Total Submissions", str(len(history_df)))
+
+    render_section_header("\U0001F4C5", "Reporting Period", month_label)
 
     if not existing:
-        days_remaining = DEADLINE_DAY_OF_MONTH - today.day
         if days_remaining > 0:
             st.warning(f"⏳ {days_remaining} day(s) left until the submission deadline (day {DEADLINE_DAY_OF_MONTH} of the month).")
         else:
@@ -830,25 +967,24 @@ def render_bu_dashboard() -> None:
                     except Exception as exc:
                         st.error(f"Submission failed: {exc}")
 
-    st.markdown("#### \U0001F4DC Your Submission History")
-    history_df = get_submissions_for_bu(bu_name)
+    render_section_header("\U0001F4DC", "Your Submission History", f"{len(history_df)} total")
     if history_df.empty:
-        st.caption("No submissions yet.")
+        render_empty_state("No submissions yet — upload your first report above.")
     else:
         display_cols = ["submission_month", "file_name", "submission_order", "status", "created_at", "file_url"]
         display_cols = [c for c in display_cols if c in history_df.columns]
-        st.dataframe(history_df[display_cols], use_container_width=True, hide_index=True)
+        st.dataframe(format_display_df(history_df[display_cols]), use_container_width=True, hide_index=True)
 
 
 # ===========================================================================
 # UI: Admin dashboard
 # ===========================================================================
 def render_pending_approvals() -> None:
-    st.markdown("#### ✅ Pending User Approvals")
     pending_df = get_pending_users()
+    render_section_header("✅", "Pending User Approvals", f"{len(pending_df)} awaiting review")
 
     if pending_df.empty:
-        st.caption("No pending registrations.")
+        render_empty_state("No pending registrations.")
         return
 
     for _, row in pending_df.iterrows():
@@ -870,11 +1006,11 @@ def render_pending_approvals() -> None:
 
 
 def render_user_management() -> None:
-    st.markdown("#### \U0001F465 User Management")
     users_df = get_all_users()
+    render_section_header("\U0001F465", "User Management", f"{len(users_df)} accounts")
 
     if users_df.empty:
-        st.caption("No users yet.")
+        render_empty_state("No users yet.")
         return
 
     editable_df = users_df[["username", "role", "bu_name", "status", "created_at"]].copy()
@@ -909,7 +1045,7 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
         submissions = [s for s in submissions if s["bu_name"] == bu_filter]
 
     if not submissions:
-        st.caption("No submissions match this filter.")
+        render_empty_state("No submissions match this filter.")
         return
 
     original_df = pd.DataFrame(submissions)
@@ -953,14 +1089,14 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
 
 
 def render_rank_trend_chart(history_df: pd.DataFrame) -> None:
-    st.markdown("#### \U0001F4C8 Rank Trend by Business Unit")
+    render_section_header("\U0001F4C8", "Rank Trend by Business Unit")
 
     if history_df.empty:
-        st.caption("No submission history yet.")
+        render_empty_state("No submission history yet.")
         return
 
     if history_df["submission_month"].nunique() < 2:
-        st.caption("Trend needs at least two months of submissions -- check back after next month's reports.")
+        render_empty_state("Trend needs at least two months of submissions -- check back after next month's reports.")
         return
 
     by_activity = history_df["bu_name"].value_counts().index.tolist()
@@ -1039,10 +1175,10 @@ def render_rank_trend_chart(history_df: pd.DataFrame) -> None:
 
 
 def render_ranking_export(history_df: pd.DataFrame) -> None:
-    st.markdown("#### \U0001F4E4 Export Ranking History")
+    render_section_header("\U0001F4E4", "Export Ranking History", f"{len(history_df)} records")
 
     if history_df.empty:
-        st.caption("Nothing to export yet.")
+        render_empty_state("Nothing to export yet.")
         return
 
     csv_bytes = history_df.to_csv(index=False).encode("utf-8")
@@ -1055,27 +1191,10 @@ def render_ranking_export(history_df: pd.DataFrame) -> None:
     )
 
 
-def render_admin_dashboard() -> None:
-    render_app_header("Review submissions and manage rankings")
-
-    today = date.today()
-    if today.day > DEADLINE_DAY_OF_MONTH:
-        overdue = get_overdue_bus(today.strftime("%Y-%m"))
-        if overdue:
-            st.error(
-                f"⚠️ {len(overdue)} Business Unit(s) missed the day-{DEADLINE_DAY_OF_MONTH} deadline "
-                f"for {today.strftime('%B %Y')}: {', '.join(overdue)}"
-            )
-            st.divider()
-
-    render_pending_approvals()
-    st.divider()
-    render_user_management()
-    st.divider()
-
+def render_admin_overview_tab() -> None:
     months = get_available_months()
     if not months:
-        st.info("No submissions have been made yet.")
+        render_empty_state("No submissions have been made yet.")
         return
 
     col_month, col_bu = st.columns(2)
@@ -1087,7 +1206,7 @@ def render_admin_dashboard() -> None:
         )
         selected_bu = st.selectbox("Business unit", bu_options, index=0)
 
-    st.markdown("#### \U0001F3C6 Top Submissions")
+    render_section_header("\U0001F3C6", "Top Submissions")
     top_submissions = get_submissions_for_month(selected_month)
     col1, col2 = st.columns(2)
     for col, rank in ((col1, 1), (col2, 2)):
@@ -1113,15 +1232,42 @@ def render_admin_dashboard() -> None:
                     unsafe_allow_html=True,
                 )
 
-    st.markdown("#### \U0001F4CB Submissions & Ranking Overrides")
+    render_section_header("\U0001F4CB", "Submissions & Ranking Overrides")
     render_admin_month_table(selected_month, selected_bu)
 
+
+def render_admin_users_tab() -> None:
+    render_pending_approvals()
     st.divider()
+    render_user_management()
+
+
+def render_admin_analytics_tab() -> None:
     history_df = get_all_submissions_history()
     render_rank_trend_chart(history_df)
-
     st.divider()
     render_ranking_export(history_df)
+
+
+def render_admin_dashboard() -> None:
+    render_app_header("Review submissions and manage rankings")
+
+    today = date.today()
+    if today.day > DEADLINE_DAY_OF_MONTH:
+        overdue = get_overdue_bus(today.strftime("%Y-%m"))
+        if overdue:
+            st.error(
+                f"⚠️ {len(overdue)} Business Unit(s) missed the day-{DEADLINE_DAY_OF_MONTH} deadline "
+                f"for {today.strftime('%B %Y')}: {', '.join(overdue)}"
+            )
+
+    overview_tab, users_tab, analytics_tab = st.tabs(["\U0001F4CA Overview", "\U0001F465 Users", "\U0001F4C8 Analytics"])
+    with overview_tab:
+        render_admin_overview_tab()
+    with users_tab:
+        render_admin_users_tab()
+    with analytics_tab:
+        render_admin_analytics_tab()
 
 
 # ===========================================================================
