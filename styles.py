@@ -2,41 +2,55 @@
 styles.py
 ---------
 Custom CSS injection and small HTML-snippet builders (metric cards, status
-badges) for the Dark Slate dashboard theme. Kept separate from app.py so the
-visual design can change without touching any business logic.
+badges) for the "Sky Blue" light dashboard theme. Kept separate from app.py
+so the visual design can change without touching any business logic.
+
+Colors were picked and contrast-checked deliberately, not eyeballed --
+see the :root comment below for the numbers. A literal saturated sky-blue
+background would fight readability at this scale, so the page background
+is a soft, pale blue tint; the vivid blue is reserved for accents (buttons,
+links, highlighted numbers) against white cards, which is what actually
+reads as "professional" rather than "loud."
 """
 
 import streamlit as st
 
-# Status -> (label color, background) for the color-coded badges.
+# Status -> (text color, tint background) for the color-coded badges.
+# Dark, saturated text on a pale tint -- not solid fills -- keeps them
+# legible on both the page background and white cards.
 STATUS_BADGE_COLORS = {
-    "Submitted": ("#22C55E", "rgba(34, 197, 94, 0.12)"),   # green
-    "Late": ("#EF4444", "rgba(239, 68, 68, 0.12)"),         # red
-    "Pending": ("#EAB308", "rgba(234, 179, 8, 0.12)"),      # yellow
+    "Submitted": ("#15803D", "#DCFCE7"),   # green
+    "Late": ("#B91C1C", "#FEE2E2"),         # red
+    "Pending": ("#B45309", "#FEF3C7"),      # amber
 }
 
 
 def inject_custom_css() -> None:
-    """Dark Slate theme: #0F172A page background, #1E293B cards, rounded
-    borders. Also hides Streamlit's default chrome (menu, footer, header)."""
+    """Sky Blue light theme: pale sky-tinted page background, white cards,
+    a deep navy sidebar for chrome/navigation contrast. Also hides
+    Streamlit's default chrome (menu, footer, header)."""
     st.markdown(
         """
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
         :root {
-            --bg: #0F172A;
-            --card: #1E293B;
-            --card-border: #334155;
-            --text: #F1F5F9;
-            --text-muted: #94A3B8;
-            /* Sky blue: distinct from the red/yellow/green status badges
-               (so "clickable" never reads as "status"), and clears
-               contrast comfortably against the dark surfaces -- 6.4:1 vs
-               bg, 5.3:1 vs card; hover shade 4.4:1 / 3.6:1, both above the
-               3:1 UI-contrast floor. */
-            --accent: #0EA5E9;
-            --accent-hover: #0284C7;
+            --bg: #F0F9FF;            /* sky-50 -- soft, pale, not saturated */
+            --card: #FFFFFF;
+            --card-border: #BAE6FD;   /* sky-200 */
+            --text: #0F172A;
+            --text-muted: #475569;    /* slate-600 -- 7.1:1 vs bg, safer margin than a lighter gray */
+            --sidebar: #0C4A6E;       /* sky-900 -- dark navy chrome, ties into the theme */
+            --sidebar-text: #E0F2FE;  /* sky-100 */
+            /* Sky blue accent family, split by use so contrast holds at
+               every size (validated against --bg and white buttons):
+               - accent-large: big bold numbers (>=3:1 floor for large text)
+               - accent: buttons, links, small text (>=4.5:1 floor)
+               - accent-hover: hover/active state, darkest for clear feedback */
+            --accent-large: #0284C7;  /* sky-600 -- 3.8:1 vs bg */
+            --accent: #0369A1;        /* sky-700 -- 5.9:1 white-on-it, 5.6:1 vs bg */
+            --accent-hover: #075985;  /* sky-800 -- 7.6:1 white-on-it */
+            --shadow: 0 1px 3px rgba(2, 132, 199, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
         }
 
         html, body, [class*="css"] {
@@ -66,13 +80,18 @@ def inject_custom_css() -> None:
             color: var(--text);
         }
 
+        h1, h2, h3, h4 {
+            font-weight: 700;
+            letter-spacing: -0.01em;
+        }
+
         /* KPI / metric cards */
         .metric-card {
             background: var(--card);
             border: 1px solid var(--card-border);
             border-radius: 14px;
             padding: 1.2rem 1.4rem;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+            box-shadow: var(--shadow);
             height: 100%;
         }
         .metric-card .metric-label {
@@ -93,9 +112,9 @@ def inject_custom_css() -> None:
             color: var(--text-muted);
             margin-top: 0.2rem;
         }
-        .metric-card.accent .metric-value { color: var(--accent); }
-        .metric-card.danger .metric-value { color: #EF4444; }
-        .metric-card.warn .metric-value { color: #EAB308; }
+        .metric-card.accent .metric-value { color: var(--accent-large); }
+        .metric-card.danger .metric-value { color: #B91C1C; }
+        .metric-card.warn .metric-value { color: #B45309; }
 
         /* Status badges */
         .status-badge {
@@ -106,12 +125,13 @@ def inject_custom_css() -> None:
             font-weight: 700;
         }
 
-        /* Generic dark card wrapper for sections */
+        /* Generic card wrapper for sections */
         .dark-card {
             background: var(--card);
             border: 1px solid var(--card-border);
             border-radius: 14px;
             padding: 1.2rem 1.4rem;
+            box-shadow: var(--shadow);
         }
 
         /* Buttons */
@@ -135,17 +155,52 @@ def inject_custom_css() -> None:
             border-radius: 8px !important;
             border: 1px solid var(--card-border) !important;
         }
+        .stTextInput input:focus, .stNumberInput input:focus {
+            border-color: var(--accent) !important;
+            box-shadow: 0 0 0 3px rgba(3, 105, 161, 0.15) !important;
+        }
 
         /* Tables */
         [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
             border-radius: 12px;
             overflow: hidden;
             border: 1px solid var(--card-border);
+            box-shadow: var(--shadow);
+        }
+
+        /* Tabs -- pill-style so they read as a segmented control */
+        [data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 4px;
+            background: #E0F2FE;
+            padding: 4px;
+            border-radius: 10px;
+            border: 1px solid var(--card-border);
+        }
+        [data-testid="stTabs"] [data-baseweb="tab-highlight"],
+        [data-testid="stTabs"] [data-baseweb="tab-border"] {
+            display: none;
+        }
+        [data-testid="stTabs"] button[data-baseweb="tab"] {
+            flex: 1;
+            justify-content: center;
+            border-radius: 7px;
+            padding: 0.5rem 0;
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        [data-testid="stTabs"] button[aria-selected="true"] {
+            background: var(--card);
+            color: var(--accent);
+            box-shadow: var(--shadow);
         }
 
         [data-testid="stSidebar"] {
-            background: #0B1120;
+            background: var(--sidebar);
             border-right: 1px solid var(--card-border);
+        }
+        [data-testid="stSidebar"] * {
+            color: var(--sidebar-text) !important;
         }
         </style>
         """,
@@ -154,7 +209,7 @@ def inject_custom_css() -> None:
 
 
 def status_badge_html(status: str) -> str:
-    color, bg = STATUS_BADGE_COLORS.get(status, ("#94A3B8", "rgba(148, 163, 184, 0.12)"))
+    color, bg = STATUS_BADGE_COLORS.get(status, ("#475569", "#F1F5F9"))
     return f'<span class="status-badge" style="color:{color};background:{bg};">{status}</span>'
 
 

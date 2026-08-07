@@ -43,7 +43,7 @@ def render_login() -> None:
         """
         <div style="max-width:420px;margin:6vh auto 0 auto;">
             <h2 style="text-align:center;">\U0001F4CA BU Performance &amp; Ranking</h2>
-            <p style="text-align:center;color:#94A3B8;">Sign in, or register a new Business Unit account</p>
+            <p style="text-align:center;color:#475569;">Sign in, or register a new Business Unit account</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -85,36 +85,33 @@ def render_login() -> None:
                         st.rerun()
 
         with register_tab:
-            st.caption("New Business Unit accounts require admin approval before you can log in.")
-            bu_options_df = db.get_business_units_public()
+            st.caption("New accounts require admin approval before you can log in.")
 
-            if bu_options_df.empty:
-                st.info("No Business Units have been set up yet -- ask your admin to add one before registering.")
-            else:
-                bu_choices = dict(zip(bu_options_df["bu_name"], bu_options_df["id"]))
-                with st.form("register_form", clear_on_submit=True):
-                    reg_full_name = st.text_input("Full name")
-                    reg_bu_label = st.selectbox("Business Unit", list(bu_choices.keys()))
-                    reg_email = st.text_input("Email")
-                    reg_password = st.text_input("Choose a password", type="password")
-                    reg_password_confirm = st.text_input("Confirm password", type="password")
-                    reg_submitted = st.form_submit_button("Request Access", use_container_width=True)
+            existing_bus = db.get_business_units_public()
+            if not existing_bus.empty:
+                st.caption("Existing Business Units: " + ", ".join(existing_bus["bu_name"]) + " — type one of these exactly to join it, or a new name to create it.")
 
-                if reg_submitted:
-                    if not reg_full_name or not reg_email or not reg_password:
-                        st.error("Please fill in all fields.")
-                    elif len(reg_password) < 8:
-                        st.error("Password must be at least 8 characters.")
-                    elif reg_password != reg_password_confirm:
-                        st.error("Passwords do not match.")
-                    else:
-                        try:
-                            db.self_register(
-                                reg_email.strip(), reg_password, reg_full_name.strip(), bu_choices[reg_bu_label]
-                            )
-                            st.success("Registration submitted! An admin must approve your account before you can log in.")
-                        except Exception as exc:
-                            st.error(f"Registration failed: {exc}")
+            with st.form("register_form", clear_on_submit=True):
+                reg_full_name = st.text_input("Full name")
+                reg_bu_name = st.text_input("Your Business Unit name", placeholder="e.g. Sales")
+                reg_email = st.text_input("Email")
+                reg_password = st.text_input("Choose a password", type="password")
+                reg_password_confirm = st.text_input("Confirm password", type="password")
+                reg_submitted = st.form_submit_button("Request Access", use_container_width=True)
+
+            if reg_submitted:
+                if not reg_full_name or not reg_bu_name or not reg_email or not reg_password:
+                    st.error("Please fill in all fields.")
+                elif len(reg_password) < 8:
+                    st.error("Password must be at least 8 characters.")
+                elif reg_password != reg_password_confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    try:
+                        db.self_register(reg_email.strip(), reg_password, reg_full_name.strip(), reg_bu_name.strip())
+                        st.success("Registration submitted! An admin must approve your account before you can log in.")
+                    except Exception as exc:
+                        st.error(f"Registration failed: {exc}")
 
 
 # ============================================================================
@@ -313,7 +310,7 @@ def render_pending_approvals(all_bus_df: pd.DataFrame) -> None:
         col_info, col_approve, col_reject = st.columns([3, 1, 1])
         with col_info:
             bu_name = bu_lookup.get(row["bu_id"], "—")
-            st.markdown(f"**{row['full_name']}** — {bu_name}  \n<span style='color:#94A3B8;font-size:0.8rem;'>Requested {row['created_at']}</span>", unsafe_allow_html=True)
+            st.markdown(f"**{row['full_name']}** — {bu_name}  \n<span style='color:#475569;font-size:0.8rem;'>Requested {row['created_at']}</span>", unsafe_allow_html=True)
         with col_approve:
             if st.button("Approve", key=f"approve_{row['id']}", use_container_width=True):
                 db.update_profile_status(row["id"], "approved")
@@ -329,56 +326,45 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
     st.divider()
 
     st.markdown("#### \U0001F3E2 Business Units")
+    st.caption("Business Units are created by users at registration, not by admin.")
     st.dataframe(all_bus_df, use_container_width=True, hide_index=True)
 
-    with st.expander("Add a Business Unit"):
-        with st.form("add_bu_form", clear_on_submit=True):
-            bu_name = st.text_input("Business Unit name")
-            bu_code = st.text_input("Business Unit code")
-            if st.form_submit_button("Add"):
-                if bu_name and bu_code:
-                    try:
-                        db.create_business_unit(bu_name.strip(), bu_code.strip())
-                        st.success(f"Added {bu_name}.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Could not add: {exc}")
-                else:
-                    st.error("Both name and code are required.")
-
     st.divider()
-    st.markdown("#### \U0001F465 User Accounts & Roles")
+    st.markdown("#### \U0001F465 User Control")
+    st.caption("Change a user's role or status, then Apply Changes. Admin does not create accounts here -- only approves (above) and manages existing ones.")
+
     profiles_df = db.get_all_profiles()
     bu_lookup = dict(zip(all_bus_df["id"], all_bus_df["bu_name"])) if not all_bus_df.empty else {}
-    if not profiles_df.empty:
-        profiles_df["bu_name"] = profiles_df["bu_id"].map(bu_lookup)
-        st.dataframe(
-            profiles_df[["full_name", "role", "bu_name", "status", "created_at"]], use_container_width=True, hide_index=True
-        )
-    else:
-        st.caption("No user accounts yet.")
 
-    with st.expander("Create a new user account"):
-        with st.form("create_user_form", clear_on_submit=True):
-            new_email = st.text_input("Email")
-            new_password = st.text_input("Temporary password", type="password")
-            new_full_name = st.text_input("Full name")
-            new_role = st.selectbox("Role", ["bu_user", "admin"])
-            bu_options = {"— none —": None}
-            bu_options.update({row["bu_name"]: row["id"] for _, row in all_bus_df.iterrows()})
-            new_bu_label = st.selectbox("Business Unit", list(bu_options.keys()))
-            if st.form_submit_button("Create Account"):
-                if not new_email or not new_password or not new_full_name:
-                    st.error("Email, password, and full name are required.")
-                else:
-                    try:
-                        db.create_bu_user_account(
-                            new_email.strip(), new_password, new_full_name.strip(), new_role, bu_options[new_bu_label]
-                        )
-                        st.success(f"Account created for {new_email}. Share the password with them securely.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Could not create account: {exc}")
+    if profiles_df.empty:
+        st.caption("No user accounts yet.")
+        return
+
+    profiles_df["bu_name"] = profiles_df["bu_id"].map(bu_lookup)
+    editable_df = profiles_df[["full_name", "bu_name", "role", "status", "created_at"]].copy()
+
+    edited_df = st.data_editor(
+        editable_df,
+        column_config={
+            "full_name": st.column_config.TextColumn("Name", disabled=True),
+            "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
+            "role": st.column_config.SelectboxColumn("Role", options=["bu_user", "admin"]),
+            "status": st.column_config.SelectboxColumn("Status", options=["pending", "approved", "rejected"]),
+            "created_at": st.column_config.TextColumn("Registered At", disabled=True),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key="user_control_editor",
+    )
+
+    if st.button("Apply Changes", key="apply_user_control", use_container_width=True):
+        try:
+            db.apply_profile_changes(profiles_df, edited_df)
+            st.success("User accounts updated.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not apply changes: {exc}")
 
 
 def render_admin_dashboard() -> None:

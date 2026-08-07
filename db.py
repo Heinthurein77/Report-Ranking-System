@@ -3,12 +3,18 @@ db.py
 -----
 Data access layer. Every function here goes through the per-session
 authenticated client (supabase_client.get_session_client) UNLESS it's
-explicitly an admin-provisioning action that Supabase Auth requires the
-service-role client for (create_bu_user_account) -- see supabase_client.py
-for why that split exists. RLS policies (schema.sql) are the real
+explicitly a self-registration action that needs to bypass RLS (see
+self_register/get_or_create_business_unit) -- see supabase_client.py for
+why that split exists. RLS policies (schema.sql) are the real
 authorization boundary; this module doesn't re-check roles itself.
+
+There is no admin-side account/BU creation in this version: users create
+their own account AND their own Business Unit name at registration time
+(self_register); admin's role is limited to approving/rejecting
+registrations and controlling existing accounts afterward (role/status).
 """
 
+import re
 from typing import Optional
 
 import pandas as pd
@@ -41,18 +47,62 @@ def get_business_units() -> pd.DataFrame:
 
 
 def get_business_units_public() -> pd.DataFrame:
-    """For the registration form's BU dropdown, shown BEFORE the visitor is
-    signed in -- an anonymous Postgrest role can't satisfy the
-    `bu_select_authenticated` RLS policy, so this deliberately uses the
-    service client for this one public-facing read-only list."""
+    """For the registration form (shown as a reference list of existing BU
+    names, so a new registrant can match spelling instead of accidentally
+    creating a near-duplicate), used BEFORE the visitor is signed in -- an
+    anonymous Postgrest role can't satisfy the `bu_select_authenticated`
+    RLS policy, so this deliberately uses the service client."""
     service_client = get_service_client()
     resp = service_client.table("business_units").select("*").order("bu_name").execute()
     return _to_df(resp.data, BUSINESS_UNIT_COLUMNS)
 
 
-def create_business_unit(bu_name: str, bu_code: str) -> None:
-    client = get_session_client()
-    client.table("business_units").insert({"bu_name": bu_name, "bu_code": bu_code}).execute()
+def _slugify_bu_code(bu_name: str) -> str:
+    code = re.sub(r"[^A-Za-z0-9]+", "", bu_name).upper()[:10]
+    return code or "BU"
+
+
+def get_or_create_business_unit(bu_name: str) -> str:
+    """Registration lets a user type their own Business Unit name rather
+    than pick from an admin-curated list, so this is the one place BUs get
+    created. Matches case-insensitively against existing names first, so
+    "Sales" and "sales" reuse the same BU instead of fragmenting the
+    ranking across near-duplicate rows. Uses the service client since an
+    unauthenticated registrant can't satisfy bu_write_admin. Returns the
+    BU's id either way."""
+    service_client = get_service_client()
+    bu_name = bu_name.strip()
+
+    existing = (
+        service_client.table("business_units")
+        .select("id, bu_name")
+        .ilike("bu_name", bu_name)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        return existing.data[0]["id"]
+
+    base_code = _slugify_bu_code(bu_name)
+    code = base_code
+    suffix = 1
+    while True:
+        try:
+            created = (
+                service_client.table("business_units")
+                .insert({"bu_name": bu_name, "bu_code": code})
+                .execute()
+            )
+            return created.data[0]["id"]
+        except Exception as exc:
+            # bu_code collision (different name, same slug) -- try the next suffix.
+            if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+                suffix += 1
+                code = f"{base_code}{suffix}"
+                if suffix > 50:
+                    raise
+            else:
+                raise
 
 
 # ============================================================================
@@ -93,36 +143,37 @@ def update_profile_role_bu(profile_id: str, role: str, bu_id: Optional[str]) -> 
     client.table("profiles").update({"role": role, "bu_id": bu_id}).eq("id", profile_id).execute()
 
 
-def create_bu_user_account(email: str, password: str, full_name: str, role: str, bu_id: Optional[str]) -> dict:
-    """Admin-only provisioning: creates the Supabase Auth login (requires
-    the service-role client -- this is the one privileged action regular
-    RLS can't grant) and the matching profiles row, pre-approved since an
-    admin is vouching for it directly. Returns the new profile dict."""
-    service_client = get_service_client()
-
-    auth_result = service_client.auth.admin.create_user(
-        {
-            "email": email,
-            "password": password,
-            "email_confirm": True,  # internal tool: skip the email confirmation step
-        }
-    )
-    new_user_id = auth_result.user.id
-
-    record = {"id": new_user_id, "full_name": full_name, "role": role, "bu_id": bu_id, "status": "approved"}
-    service_client.table("profiles").insert(record).execute()
-    return record
+def apply_profile_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> None:
+    """Admin's ongoing user-control function: diff an edited copy of
+    get_all_profiles() against the original and push only the changed
+    role/status values. RLS's profiles_update_admin policy is what
+    actually restricts this to an admin's own authenticated session."""
+    client = get_session_client()
+    for i in range(len(original_df)):
+        profile_id = original_df.iloc[i]["id"]
+        changes = {}
+        if edited_df.iloc[i]["role"] != original_df.iloc[i]["role"]:
+            changes["role"] = edited_df.iloc[i]["role"]
+        if edited_df.iloc[i]["status"] != original_df.iloc[i]["status"]:
+            changes["status"] = edited_df.iloc[i]["status"]
+        if changes:
+            client.table("profiles").update(changes).eq("id", profile_id).execute()
 
 
-def self_register(email: str, password: str, full_name: str, bu_id: str) -> dict:
+def self_register(email: str, password: str, full_name: str, bu_name: str) -> dict:
     """Public self-registration: the login itself is created via the
     ordinary (public) sign-up endpoint on the anon-key client -- no
-    service key needed for that part, anyone can call it. The matching
-    profiles row is then created via the SERVICE client, deliberately
-    bypassing RLS, so role/status can be hard-locked here to
-    'bu_user'/'pending' regardless of what a request might try to send --
-    a self-registering visitor can never grant themselves admin or
-    pre-approve their own account this way."""
+    service key needed for that part, anyone can call it. The Business
+    Unit is created (or matched to an existing one -- see
+    get_or_create_business_unit) from whatever name the registrant types;
+    there is no admin-curated BU list to pick from. The matching profiles
+    row is then created via the SERVICE client, deliberately bypassing
+    RLS, so role/status can be hard-locked here to 'bu_user'/'pending'
+    regardless of what a request might try to send -- a self-registering
+    visitor can never grant themselves admin or pre-approve their own
+    account this way."""
+    bu_id = get_or_create_business_unit(bu_name)
+
     anon_client = get_session_client()
     auth_result = anon_client.auth.sign_up({"email": email, "password": password})
     if not auth_result.user:
