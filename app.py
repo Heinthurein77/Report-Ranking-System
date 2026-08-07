@@ -1,7 +1,7 @@
 
 
 import os
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import altair as alt
@@ -23,6 +23,8 @@ st.set_page_config(
 MAX_UPLOAD_MB = 15
 STORAGE_BUCKET = "bu-reports"
 DEADLINE_DAY_OF_MONTH = 14  # submissions due within the first 14 days of each month
+
+MYANMAR_TZ = timezone(timedelta(hours=6, minutes=30))  # fixed offset, no DST
 
 STATUS_OPTIONS = ["Submitted", "Under Review", "Incomplete / Needs Fix", "Approved"]
 USER_STATUS_OPTIONS = ["pending", "approved", "rejected", "suspended"]
@@ -436,15 +438,40 @@ def status_badge_html(status: str) -> str:
     return f'<span class="status-badge {css_class}">{status}</span>'
 
 
+def now_mmt() -> datetime:
+    return datetime.now(MYANMAR_TZ)
+
+
+def today_mmt() -> date:
+    return now_mmt().date()
+
+
+def parse_to_mmt(timestamp: Optional[str]) -> Optional[datetime]:
+    """Parse a Supabase timestamptz string (UTC) and convert to Myanmar time."""
+    if not timestamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MYANMAR_TZ)
+
+
+def format_mmt(timestamp: Optional[str], fmt: str = "%Y-%m-%d %H:%M") -> str:
+    dt = parse_to_mmt(timestamp)
+    return dt.strftime(fmt) if dt else ""
+
+
 def is_late_submission(created_at: str) -> bool:
     """A submission is late if it landed after day DEADLINE_DAY_OF_MONTH of
-    the month, based on its own created_at (not "today") so history stays
-    accurate regardless of when it's viewed."""
-    try:
-        submitted_day = int(created_at[8:10])
-    except (TypeError, ValueError):
+    the month IN MYANMAR TIME, based on its own created_at (not "today") so
+    history stays accurate regardless of when it's viewed."""
+    dt = parse_to_mmt(created_at)
+    if dt is None:
         return False
-    return submitted_day > DEADLINE_DAY_OF_MONTH
+    return dt.day > DEADLINE_DAY_OF_MONTH
 
 
 def late_badge_html(created_at: str) -> str:
@@ -771,7 +798,7 @@ DISPLAY_COLUMN_LABELS = {
     "submission_order": "Rank",
     "status": "Status",
     "uploaded_by": "Uploaded By",
-    "created_at": "Submitted At",
+    "created_at": "Submitted At (MMT)",
     "file_url": "File Link",
 }
 
@@ -779,7 +806,7 @@ DISPLAY_COLUMN_LABELS = {
 def format_display_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "created_at" in df.columns:
-        df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+        df["created_at"] = df["created_at"].apply(format_mmt)
     return df.rename(columns=DISPLAY_COLUMN_LABELS)
 
 
@@ -879,7 +906,7 @@ def render_bu_dashboard() -> None:
         st.error("Your account is not linked to a Business Unit. Please contact your admin.")
         return
 
-    today = date.today()
+    today = today_mmt()
     month = today.strftime("%Y-%m")
     month_label = today.strftime("%B %Y")
     days_remaining = DEADLINE_DAY_OF_MONTH - today.day
@@ -926,7 +953,7 @@ def render_bu_dashboard() -> None:
                     <div class="label">Your Current Submission Order</div>
                     <div class="rank-badge">{medal}</div>
                     <div class="score">Rank #{existing['submission_order']}</div>
-                    <div class="label" style="margin-top:0.6rem;">Submitted on: {existing['created_at'][:10]}</div>
+                    <div class="label" style="margin-top:0.6rem;">Submitted on: {format_mmt(existing['created_at'], '%Y-%m-%d %H:%M')} (MMT)</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -992,7 +1019,7 @@ def render_pending_approvals() -> None:
         with col_info:
             st.markdown(
                 f"**{row['username']}** — {row['bu_name']}  \n"
-                f"<span style='color:#64748B;font-size:0.8rem;'>Requested {row['created_at']}</span>",
+                f"<span style='color:#64748B;font-size:0.8rem;'>Requested {format_mmt(row['created_at'])} (MMT)</span>",
                 unsafe_allow_html=True,
             )
         with col_approve:
@@ -1014,6 +1041,7 @@ def render_user_management() -> None:
         return
 
     editable_df = users_df[["username", "role", "bu_name", "status", "created_at"]].copy()
+    editable_df["created_at"] = editable_df["created_at"].apply(format_mmt)
 
     edited_df = st.data_editor(
         editable_df,
@@ -1022,7 +1050,7 @@ def render_user_management() -> None:
             "role": st.column_config.TextColumn("Role", disabled=True),
             "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
             "status": st.column_config.SelectboxColumn("Status", options=USER_STATUS_OPTIONS),
-            "created_at": st.column_config.TextColumn("Registered At", disabled=True),
+            "created_at": st.column_config.TextColumn("Registered At (MMT)", disabled=True),
         },
         hide_index=True,
         use_container_width=True,
@@ -1051,6 +1079,7 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
     original_df = pd.DataFrame(submissions)
     original_df["timing"] = original_df["created_at"].apply(lambda ts: "Late" if is_late_submission(ts) else "On Time")
     editable_df = original_df[["submission_order", "bu_name", "file_name", "status", "timing", "created_at"]].copy()
+    editable_df["created_at"] = editable_df["created_at"].apply(format_mmt)
 
     # Reordering rank only makes sense against the full month's field of
     # submissions -- when narrowed to a single BU, lock rank editing so a
@@ -1067,7 +1096,7 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
             "file_name": st.column_config.TextColumn("File", disabled=True),
             "status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS),
             "timing": st.column_config.TextColumn("Timing", disabled=True),
-            "created_at": st.column_config.TextColumn("Submitted At", disabled=True),
+            "created_at": st.column_config.TextColumn("Submitted At (MMT)", disabled=True),
         },
         hide_index=True,
         use_container_width=True,
@@ -1181,11 +1210,15 @@ def render_ranking_export(history_df: pd.DataFrame) -> None:
         render_empty_state("Nothing to export yet.")
         return
 
-    csv_bytes = history_df.to_csv(index=False).encode("utf-8")
+    export_df = history_df.copy()
+    export_df["created_at"] = export_df["created_at"].apply(lambda ts: format_mmt(ts, "%Y-%m-%d %H:%M:%S"))
+    export_df = export_df.rename(columns={"created_at": "created_at_mmt"})
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download Ranking History (CSV)",
         data=csv_bytes,
-        file_name=f"ranking_history_{date.today().strftime('%Y%m%d')}.csv",
+        file_name=f"ranking_history_{today_mmt().strftime('%Y%m%d')}.csv",
         mime="text/csv",
         use_container_width=True,
     )
@@ -1252,7 +1285,7 @@ def render_admin_analytics_tab() -> None:
 def render_admin_dashboard() -> None:
     render_app_header("Review submissions and manage rankings")
 
-    today = date.today()
+    today = today_mmt()
     if today.day > DEADLINE_DAY_OF_MONTH:
         overdue = get_overdue_bus(today.strftime("%Y-%m"))
         if overdue:
