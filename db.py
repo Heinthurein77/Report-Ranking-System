@@ -232,6 +232,27 @@ def get_available_months() -> list:
     return sorted({row["month_year"] for row in (resp.data or [])}, reverse=True)
 
 
+def get_all_reports_history() -> pd.DataFrame:
+    """Every report across all months -- for the Analytics trend chart and
+    the full-history CSV export (the per-month export only covers one
+    period)."""
+    client = get_session_client()
+    resp = client.table("monthly_reports").select("*").order("month_year").order("rank").execute()
+    return _to_df(resp.data, REPORT_COLUMNS)
+
+
+def get_overdue_bus(month_year: str, all_bus_df: pd.DataFrame) -> list:
+    """Business Units (from the full roster) that have NOT submitted for
+    the given month -- only meaningful to show once the deadline has
+    passed."""
+    submitted = get_reports_for_month(month_year)
+    submitted_bu_ids = set(submitted["bu_id"]) if not submitted.empty else set()
+    if all_bus_df.empty:
+        return []
+    missing = all_bus_df[~all_bus_df["id"].isin(submitted_bu_ids)]
+    return sorted(missing["bu_name"].tolist())
+
+
 def get_next_rank(month_year: str) -> int:
     """Arrival order within the month: 1st BU to submit gets rank 1."""
     client = get_session_client()
@@ -288,3 +309,23 @@ def update_report_rank_status(report_id: str, rank: int, status: str) -> None:
     session (reports_update_admin policy checks is_admin())."""
     client = get_session_client()
     client.table("monthly_reports").update({"rank": rank, "status": status}).eq("id", report_id).execute()
+
+
+def delete_report(report_id: str, file_path: str, month_year: str) -> None:
+    """Admin-only (reports_delete_admin RLS policy). Removes the stored
+    file, deletes the record, then closes the rank gap it leaves behind
+    so the remaining reports for that month stay a contiguous 1..N."""
+    service_client = get_service_client()
+    if file_path:
+        try:
+            service_client.storage.from_(STORAGE_BUCKET).remove([file_path])
+        except Exception:
+            pass  # file may already be gone -- don't block the record delete on storage cleanup
+
+    client = get_session_client()
+    client.table("monthly_reports").delete().eq("id", report_id).execute()
+
+    remaining = get_reports_for_month(month_year).sort_values("rank")
+    for new_rank, (_, row) in enumerate(remaining.iterrows(), start=1):
+        if new_rank != row["rank"]:
+            client.table("monthly_reports").update({"rank": new_rank}).eq("id", row["id"]).execute()

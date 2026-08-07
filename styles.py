@@ -85,6 +85,53 @@ def inject_custom_css() -> None:
             letter-spacing: -0.01em;
         }
 
+        /* Section headers: a consistent, bordered header bar for every
+           dashboard section instead of a bare markdown heading */
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 0.55rem;
+            margin: 0.4rem 0 1rem 0;
+            border-bottom: 1px solid var(--card-border);
+        }
+        .section-header .section-title {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .section-header .section-icon {
+            width: 26px;
+            height: 26px;
+            border-radius: 7px;
+            background: #E0F2FE;
+            color: var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+        .section-header .section-meta {
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        /* Empty state */
+        .empty-state {
+            background: var(--card);
+            border: 1px dashed var(--card-border);
+            border-radius: 10px;
+            padding: 1.5rem;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
         /* KPI / metric cards */
         .metric-card {
             background: var(--card);
@@ -223,3 +270,17 @@ def metric_card_html(label: str, value: str, sub: str = "", variant: str = "") -
             {sub_html}
         </div>
     """
+
+
+def section_header_html(icon: str, title: str, meta: str = "") -> str:
+    meta_html = f'<span class="section-meta">{meta}</span>' if meta else ""
+    return f"""
+        <div class="section-header">
+            <div class="section-title"><span class="section-icon">{icon}</span>{title}</div>
+            {meta_html}
+        </div>
+    """
+
+
+def empty_state_html(message: str) -> str:
+    return f'<div class="empty-state">{message}</div>'
