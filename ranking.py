@@ -11,7 +11,8 @@ gets rank 1), assigned at insert time (see db.py: get_next_rank) and
 editable by admin afterward.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 
 import pandas as pd
 
@@ -22,6 +23,34 @@ DEADLINE_DAY = 14
 
 def now_mmt() -> datetime:
     return datetime.now(MYANMAR_TZ)
+
+
+def today_mmt() -> date:
+    """The reporting period a submission belongs to, and the deadline
+    countdown, must follow Myanmar's calendar day -- not the app server's
+    (Streamlit Cloud typically runs UTC), which would misfile submissions
+    made near the UTC/MMT day boundary."""
+    return now_mmt().date()
+
+
+def parse_to_mmt(timestamp: Optional[str]) -> Optional[datetime]:
+    """Parse a Supabase timestamptz string (stored in UTC) and convert to
+    Myanmar time. Every report/account timestamp in the UI should go
+    through this before being shown -- Supabase always returns UTC."""
+    if not timestamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MYANMAR_TZ)
+
+
+def format_mmt(timestamp: Optional[str], fmt: str = "%Y-%m-%d %H:%M") -> str:
+    dt = parse_to_mmt(timestamp)
+    return dt.strftime(fmt) if dt else ""
 
 
 def get_deadline(month_year: str) -> datetime:

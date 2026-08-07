@@ -85,6 +85,92 @@ def inject_custom_css() -> None:
             letter-spacing: -0.01em;
         }
 
+        /* App header: branded top bar shown on both dashboards */
+        .app-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.95rem 1.5rem;
+            background: var(--sidebar);
+            border-radius: 12px;
+            color: #fff;
+            box-shadow: var(--shadow);
+        }
+        .app-header .title-group {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .app-header .logo-mark {
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            background: var(--accent-large);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.05rem;
+            flex-shrink: 0;
+        }
+        .app-header h1 {
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin: 0;
+            color: #fff;
+        }
+        .app-header .badge {
+            background: rgba(255,255,255,0.12);
+            border: 1px solid rgba(255,255,255,0.22);
+            padding: 0.3rem 0.85rem;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--sidebar-text);
+            white-space: nowrap;
+        }
+
+        /* Login screen */
+        .login-wrapper {
+            max-width: 400px;
+            margin: 6vh auto 0 auto;
+            background: var(--card);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 2.3rem 2.3rem 1.7rem 2.3rem;
+            box-shadow: 0 8px 28px rgba(2, 132, 199, 0.12);
+        }
+        .login-wrapper .logo-mark {
+            width: 46px;
+            height: 46px;
+            border-radius: 11px;
+            background: var(--accent-large);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+            margin: 0 auto 1.1rem auto;
+            box-shadow: 0 4px 10px rgba(2, 132, 199, 0.3);
+        }
+        .login-wrapper h2 {
+            text-align: center;
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: var(--text);
+            margin-bottom: 0.25rem;
+        }
+        .login-wrapper p.subtitle {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-bottom: 1.5rem;
+        }
+        .login-wrapper p.footnote {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            margin-top: 0.9rem;
+        }
+
         /* Section headers: a consistent, bordered header bar for every
            dashboard section instead of a bare markdown heading */
         .section-header {
@@ -248,6 +334,19 @@ def inject_custom_css() -> None:
         }
         [data-testid="stSidebar"] * {
             color: var(--sidebar-text) !important;
+        }
+        [data-testid="stSidebar"] .avatar-circle {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: var(--accent-large);
+            color: #fff !important;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.9rem;
+            margin-bottom: 0.6rem;
         }
         </style>
         """,

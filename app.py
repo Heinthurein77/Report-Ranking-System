@@ -21,8 +21,6 @@ Required Supabase setup: run schema.sql once (creates tables + RLS), then
 seed one admin profile as described at the bottom of that file.
 """
 
-from datetime import date
-
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -46,6 +44,7 @@ RANKING_DISPLAY_COLUMNS = {
     "rank": "Rank",
     "status": "Status",
     "file_name": "File",
+    "submitted_at": "Submitted At (MMT)",
 }
 
 st.set_page_config(
@@ -60,79 +59,76 @@ st.set_page_config(
 # Login page
 # ============================================================================
 def render_login() -> None:
-    st.markdown(
-        """
-        <div style="max-width:420px;margin:6vh auto 0 auto;">
-            <h2 style="text-align:center;">\U0001F4CA BU Performance &amp; Ranking</h2>
-            <p style="text-align:center;color:#475569;">Sign in, or register a new Business Unit account</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    col1, col2, col3 = st.columns([1, 1.2, 1])
-    with col2:
-        login_tab, register_tab = st.tabs(["Log in", "Register"])
+    st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
+    st.markdown('<div class="logo-mark">\U0001F4CA</div>', unsafe_allow_html=True)
+    st.markdown("<h2>BU Performance &amp; Ranking</h2>", unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Sign in, or register a new Business Unit account</p>', unsafe_allow_html=True)
 
-        with login_tab:
-            with st.form("login_form"):
-                email = st.text_input("Email")
-                password = st.text_input("Password", type="password")
-                submitted = st.form_submit_button("Log in", use_container_width=True)
+    login_tab, register_tab = st.tabs(["Log in", "Register"])
 
-            if submitted:
-                if not email or not password:
-                    st.error("Please enter both email and password.")
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log in", use_container_width=True)
+
+        if submitted:
+            if not email or not password:
+                st.error("Please enter both email and password.")
+            else:
+                with st.spinner("Signing in..."):
+                    profile = auth.sign_in(email.strip(), password)
+                if profile is None:
+                    st.error("Invalid email or password.")
+                elif profile.get("status") == "pending":
+                    auth.sign_out()
+                    st.warning("Your registration is awaiting admin approval. Please check back later.")
+                elif profile.get("status") == "rejected":
+                    auth.sign_out()
+                    st.error("Your registration was rejected. Please contact your admin.")
+                elif profile.get("status") != "approved":
+                    # Missing/unexpected status -- most likely the `status`
+                    # column migration in schema.sql hasn't been applied yet.
+                    auth.sign_out()
+                    st.error(
+                        "Your account is missing a valid status. If you're the admin, make sure the "
+                        "`status` column migration in schema.sql has been applied to your database."
+                    )
                 else:
-                    with st.spinner("Signing in..."):
-                        profile = auth.sign_in(email.strip(), password)
-                    if profile is None:
-                        st.error("Invalid email or password.")
-                    elif profile.get("status") == "pending":
-                        auth.sign_out()
-                        st.warning("Your registration is awaiting admin approval. Please check back later.")
-                    elif profile.get("status") == "rejected":
-                        auth.sign_out()
-                        st.error("Your registration was rejected. Please contact your admin.")
-                    elif profile.get("status") != "approved":
-                        # Missing/unexpected status -- most likely the `status`
-                        # column migration in schema.sql hasn't been applied yet.
-                        auth.sign_out()
-                        st.error(
-                            "Your account is missing a valid status. If you're the admin, make sure the "
-                            "`status` column migration in schema.sql has been applied to your database."
-                        )
-                    else:
-                        st.session_state["profile"] = profile
-                        st.rerun()
+                    st.session_state["profile"] = profile
+                    st.rerun()
+        st.markdown('<p class="footnote">Forgot your password? Contact your admin.</p>', unsafe_allow_html=True)
 
-        with register_tab:
-            st.caption("New accounts require admin approval before you can log in.")
+    with register_tab:
+        st.caption("New accounts require admin approval before you can log in.")
 
-            existing_bus = db.get_business_units_public()
-            if not existing_bus.empty:
-                st.caption("Existing Business Units: " + ", ".join(existing_bus["bu_name"]) + " — type one of these exactly to join it, or a new name to create it.")
+        existing_bus = db.get_business_units_public()
+        if not existing_bus.empty:
+            st.caption("Existing Business Units: " + ", ".join(existing_bus["bu_name"]) + " — type one of these exactly to join it, or a new name to create it.")
 
-            with st.form("register_form", clear_on_submit=True):
-                reg_full_name = st.text_input("Full name")
-                reg_bu_name = st.text_input("Your Business Unit name", placeholder="e.g. Sales")
-                reg_email = st.text_input("Email")
-                reg_password = st.text_input("Choose a password", type="password")
-                reg_password_confirm = st.text_input("Confirm password", type="password")
-                reg_submitted = st.form_submit_button("Request Access", use_container_width=True)
+        with st.form("register_form", clear_on_submit=True):
+            reg_full_name = st.text_input("Full name")
+            reg_bu_name = st.text_input("Your Business Unit name", placeholder="e.g. Sales")
+            reg_email = st.text_input("Email")
+            reg_password = st.text_input("Choose a password", type="password")
+            reg_password_confirm = st.text_input("Confirm password", type="password")
+            reg_submitted = st.form_submit_button("Request Access", use_container_width=True)
 
-            if reg_submitted:
-                if not reg_full_name or not reg_bu_name or not reg_email or not reg_password:
-                    st.error("Please fill in all fields.")
-                elif len(reg_password) < 8:
-                    st.error("Password must be at least 8 characters.")
-                elif reg_password != reg_password_confirm:
-                    st.error("Passwords do not match.")
-                else:
-                    try:
-                        db.self_register(reg_email.strip(), reg_password, reg_full_name.strip(), reg_bu_name.strip())
-                        st.success("Registration submitted! An admin must approve your account before you can log in.")
-                    except Exception as exc:
-                        st.error(f"Registration failed: {exc}")
+        if reg_submitted:
+            if not reg_full_name or not reg_bu_name or not reg_email or not reg_password:
+                st.error("Please fill in all fields.")
+            elif len(reg_password) < 8:
+                st.error("Password must be at least 8 characters.")
+            elif reg_password != reg_password_confirm:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    db.self_register(reg_email.strip(), reg_password, reg_full_name.strip(), reg_bu_name.strip())
+                    st.success("Registration submitted! An admin must approve your account before you can log in.")
+                except Exception as exc:
+                    st.error(f"Registration failed: {exc}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ============================================================================
@@ -140,8 +136,11 @@ def render_login() -> None:
 # ============================================================================
 def render_sidebar() -> None:
     with st.sidebar:
-        st.markdown("### \U0001F464 Account")
-        st.caption(st.session_state.get("auth_email", ""))
+        email = st.session_state.get("auth_email") or ""
+        initials = email[:2].upper() if email else "?"
+        st.markdown(f'<div class="avatar-circle">{initials}</div>', unsafe_allow_html=True)
+        st.markdown("**Account**")
+        st.caption(email)
         st.caption(f"Role: {st.session_state['profile'].get('role')}")
         st.divider()
         if st.button("\U0001F504 Refresh", use_container_width=True):
@@ -151,15 +150,26 @@ def render_sidebar() -> None:
             st.rerun()
 
 
-def render_dashboard_header(title: str) -> None:
-    """Title + an explicit refresh button inside the dashboard body itself
-    (in addition to the one already in the sidebar), so re-fetching the
-    latest data doesn't require hunting for it."""
+def render_dashboard_header(title: str, badge_text: str = "") -> None:
+    """Branded top bar + an explicit refresh button beside it (in addition
+    to the one already in the sidebar), so re-fetching the latest data
+    doesn't require hunting for it."""
     col_title, col_refresh = st.columns([5, 1])
     with col_title:
-        st.markdown(f"## {title}")
+        st.markdown(
+            f"""
+            <div class="app-header">
+                <div class="title-group">
+                    <div class="logo-mark">\U0001F4CA</div>
+                    <h1>{title}</h1>
+                </div>
+                <div class="badge">{badge_text}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     with col_refresh:
-        st.write("")
+        st.markdown('<div style="height:0.55rem;"></div>', unsafe_allow_html=True)
         if st.button("\U0001F504 Refresh", key=f"refresh_{title}", use_container_width=True):
             st.rerun()
 
@@ -176,8 +186,9 @@ def render_deadline_countdown_value(month_year: str) -> tuple:
 
 
 def format_ranking_display(ranked_df: pd.DataFrame) -> pd.DataFrame:
-    display_df = ranked_df[["bu_name", "bu_code", "rank", "status", "file_name"]].copy()
+    display_df = ranked_df[["bu_name", "bu_code", "rank", "status", "file_name", "submitted_at"]].copy()
     display_df["rank"] = display_df["rank"].apply(lambda r: int(r) if pd.notna(r) else None)
+    display_df["submitted_at"] = display_df["submitted_at"].apply(ranking.format_mmt)
     return display_df.rename(columns=RANKING_DISPLAY_COLUMNS)
 
 
@@ -199,10 +210,11 @@ def render_bu_dashboard() -> None:
     bu_row = all_bus_df[all_bus_df["id"] == bu_id]
     bu_name = bu_row.iloc[0]["bu_name"] if not bu_row.empty else "your BU"
 
-    month_year = date.today().strftime("%Y-%m")
-    month_label = date.today().strftime("%B %Y")
+    today = ranking.today_mmt()
+    month_year = today.strftime("%Y-%m")
+    month_label = today.strftime("%B %Y")
 
-    render_dashboard_header(f"\U0001F4E4 Submit {month_label} Report")
+    render_dashboard_header(f"\U0001F4E4 Submit {month_label} Report", bu_name)
 
     countdown_value, countdown_variant = render_deadline_countdown_value(month_year)
     st.markdown(metric_card_html("Deadline (14th, MMT)", countdown_value, "", countdown_variant), unsafe_allow_html=True)
@@ -218,6 +230,7 @@ def render_bu_dashboard() -> None:
         )
         st.write("")
         st.markdown(f"**File:** {existing['file_name']}")
+        st.markdown(f"**Submitted at:** {ranking.format_mmt(existing['submitted_at'])} (MMT)")
         st.markdown(status_badge_html(existing["status"]), unsafe_allow_html=True)
         st.markdown(f"[\U0001F4E5 View / download your file]({existing['file_url']})")
         st.caption("Need a correction? Ask your admin -- only admin can edit a submitted report.")
@@ -401,7 +414,7 @@ def render_pending_approvals(all_bus_df: pd.DataFrame) -> None:
         col_info, col_approve, col_reject = st.columns([3, 1, 1])
         with col_info:
             bu_name = bu_lookup.get(row["bu_id"], "—")
-            st.markdown(f"**{row['full_name']}** — {bu_name}  \n<span style='color:#475569;font-size:0.8rem;'>Requested {row['created_at']}</span>", unsafe_allow_html=True)
+            st.markdown(f"**{row['full_name']}** — {bu_name}  \n<span style='color:#475569;font-size:0.8rem;'>Requested {ranking.format_mmt(row['created_at'])} (MMT)</span>", unsafe_allow_html=True)
         with col_approve:
             if st.button("Approve", key=f"approve_{row['id']}", use_container_width=True):
                 db.update_profile_status(row["id"], "approved")
@@ -425,8 +438,10 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
         bu_display_df = all_bus_df
         if bu_search:
             bu_display_df = all_bus_df[all_bus_df["bu_name"].str.contains(bu_search, case=False, na=False)]
+        bu_display_df = bu_display_df.copy()
+        bu_display_df["created_at"] = bu_display_df["created_at"].apply(ranking.format_mmt)
         st.dataframe(
-            bu_display_df.rename(columns={"bu_name": "Business Unit", "bu_code": "Code", "created_at": "Created At"}),
+            bu_display_df.rename(columns={"bu_name": "Business Unit", "bu_code": "Code", "created_at": "Created At (MMT)"}),
             use_container_width=True,
             hide_index=True,
         )
@@ -452,6 +467,7 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
         filtered_profiles_df = profiles_df[mask]
 
     editable_df = filtered_profiles_df[["full_name", "bu_name", "role", "status", "created_at"]].copy()
+    editable_df["created_at"] = editable_df["created_at"].apply(ranking.format_mmt)
     edited_df = st.data_editor(
         editable_df,
         column_config={
@@ -459,7 +475,7 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
             "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
             "role": st.column_config.SelectboxColumn("Role", options=["bu_user", "admin"]),
             "status": st.column_config.SelectboxColumn("Status", options=["pending", "approved", "rejected"]),
-            "created_at": st.column_config.TextColumn("Registered At", disabled=True),
+            "created_at": st.column_config.TextColumn("Registered At (MMT)", disabled=True),
         },
         hide_index=True,
         use_container_width=True,
@@ -582,22 +598,24 @@ def render_analytics_tab(all_bus_df: pd.DataFrame) -> None:
         bu_lookup = dict(zip(all_bus_df["id"], all_bus_df["bu_name"])) if not all_bus_df.empty else {}
         export_df = history_df.copy()
         export_df["bu_name"] = export_df["bu_id"].map(bu_lookup)
+        export_df["submitted_at"] = export_df["submitted_at"].apply(lambda ts: ranking.format_mmt(ts, "%Y-%m-%d %H:%M:%S"))
+        export_df = export_df.rename(columns={"submitted_at": "submitted_at_mmt"})
         csv_bytes = export_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "Download Full Ranking History (CSV)",
             data=csv_bytes,
-            file_name=f"ranking_history_{date.today().strftime('%Y%m%d')}.csv",
+            file_name=f"ranking_history_{ranking.today_mmt().strftime('%Y%m%d')}.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
 
 def render_admin_dashboard() -> None:
-    render_dashboard_header("\U0001F4CA Admin Dashboard")
+    render_dashboard_header("\U0001F4CA Admin Dashboard", "Admin")
 
     all_bus_df = db.get_business_units()
     months = db.get_available_months()
-    current_month = date.today().strftime("%Y-%m")
+    current_month = ranking.today_mmt().strftime("%Y-%m")
     month_options = sorted(set(months) | {current_month}, reverse=True)
     selected_month = st.selectbox("Reporting period", month_options, index=0)
 
