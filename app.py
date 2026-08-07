@@ -559,6 +559,11 @@ def update_user_status(user_id: str, status: str) -> None:
     supabase.table("users").update({"status": status}).eq("id", user_id).execute()
 
 
+def delete_user(user_id: str) -> None:
+    supabase = get_supabase_client()
+    supabase.table("users").delete().eq("id", user_id).execute()
+
+
 def get_all_users() -> pd.DataFrame:
     supabase = get_supabase_client()
     resp = (
@@ -737,6 +742,24 @@ def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame) ->
     for new_order, (orig_idx, sub_id, _) in enumerate(requested_sorted, start=1):
         if new_order != original_df.iloc[orig_idx]["submission_order"]:
             supabase.table("bu_submissions").update({"submission_order": new_order}).eq("id", sub_id).execute()
+
+
+def delete_submission(submission: dict) -> None:
+    """Delete a submission's stored file and DB record, then close the rank
+    gap it leaves behind so that month's ranks stay a contiguous 1..N."""
+    supabase = get_supabase_client()
+
+    try:
+        supabase.storage.from_(STORAGE_BUCKET).remove([submission["file_path"]])
+    except Exception:
+        pass  # file may already be gone -- don't block the record delete on storage cleanup
+
+    supabase.table("bu_submissions").delete().eq("id", submission["id"]).execute()
+
+    remaining = sorted(get_submissions_for_month(submission["submission_month"]), key=lambda r: r["submission_order"])
+    for new_order, row in enumerate(remaining, start=1):
+        if new_order != row["submission_order"]:
+            supabase.table("bu_submissions").update({"submission_order": new_order}).eq("id", row["id"]).execute()
 
 
 # ===========================================================================
@@ -1066,6 +1089,22 @@ def render_user_management() -> None:
         except Exception as exc:
             st.error(f"Could not apply changes: {exc}")
 
+    with st.expander("⚠️ Danger Zone: Delete a user"):
+        deletable_df = users_df[users_df["role"] != "admin"]
+        if deletable_df.empty:
+            st.caption("No deletable users (admin accounts can't be deleted here).")
+        else:
+            options = {f"{row['username']} — {row['bu_name']}": row["id"] for _, row in deletable_df.iterrows()}
+            choice = st.selectbox("Select a user to permanently delete", list(options.keys()), key="delete_user_select")
+            confirm = st.checkbox(
+                "I understand this permanently deletes this user's login. Their past submissions are not affected.",
+                key="delete_user_confirm",
+            )
+            if st.button("Delete User", key="delete_user_btn", disabled=not confirm, use_container_width=True):
+                delete_user(options[choice])
+                st.success(f"Deleted {choice}.")
+                st.rerun()
+
 
 def render_admin_month_table(month: str, bu_filter: str) -> None:
     submissions = get_submissions_for_month(month)
@@ -1115,6 +1154,23 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"Could not apply changes: {exc}")
+
+    with st.expander("⚠️ Danger Zone: Delete a submission"):
+        options = {f"{s['bu_name']} — {s['file_name']}": s for s in submissions}
+        choice = st.selectbox(
+            "Select a submission to permanently delete", list(options.keys()), key=f"delete_sub_select_{month}_{bu_filter}"
+        )
+        confirm = st.checkbox(
+            "I understand this permanently deletes the file and its ranking record. Remaining ranks will renumber.",
+            key=f"delete_sub_confirm_{month}_{bu_filter}",
+        )
+        if st.button("Delete Submission", key=f"delete_sub_btn_{month}_{bu_filter}", disabled=not confirm, use_container_width=True):
+            try:
+                delete_submission(options[choice])
+                st.success(f"Deleted {choice}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not delete submission: {exc}")
 
 
 def render_rank_trend_chart(history_df: pd.DataFrame) -> None:
