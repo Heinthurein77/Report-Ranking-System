@@ -722,11 +722,13 @@ def get_all_submissions_history() -> pd.DataFrame:
     return pd.DataFrame(resp.data or [])
 
 
-def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> None:
+def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame, allow_reorder: bool) -> None:
     """Persist admin edits made in the data editor: status changes are applied
-    directly; submission_order changes are resolved into a strict 1..N
-    ordering (ties broken by original row order), which naturally shifts
-    every other BU's rank when one submission is moved up or down."""
+    directly. When allow_reorder is True (the full-month, unfiltered view),
+    submission_order is recomputed with incomplete submissions always sorted
+    after every complete one -- regardless of the rank number entered, since
+    data quality overrides requested position -- then resolved into a strict
+    1..N ordering, which naturally shifts every other BU's rank."""
     supabase = get_supabase_client()
 
     for i in range(len(original_df)):
@@ -736,10 +738,16 @@ def apply_admin_overrides(original_df: pd.DataFrame, edited_df: pd.DataFrame) ->
         if new_status != old_status:
             supabase.table("bu_submissions").update({"status": new_status}).eq("id", sub_id).execute()
 
-    requested = [(i, original_df.iloc[i]["id"], edited_df.iloc[i]["submission_order"]) for i in range(len(original_df))]
-    requested_sorted = sorted(requested, key=lambda t: (t[2], t[0]))
+    if not allow_reorder:
+        return
 
-    for new_order, (orig_idx, sub_id, _) in enumerate(requested_sorted, start=1):
+    requested = [
+        (i, original_df.iloc[i]["id"], edited_df.iloc[i]["status"] == "Incomplete / Needs Fix", edited_df.iloc[i]["submission_order"])
+        for i in range(len(original_df))
+    ]
+    requested_sorted = sorted(requested, key=lambda t: (t[2], t[3], t[0]))
+
+    for new_order, (orig_idx, sub_id, _, _) in enumerate(requested_sorted, start=1):
         if new_order != original_df.iloc[orig_idx]["submission_order"]:
             supabase.table("bu_submissions").update({"submission_order": new_order}).eq("id", sub_id).execute()
 
@@ -1120,12 +1128,18 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
     editable_df = original_df[["submission_order", "bu_name", "file_name", "status", "timing", "created_at"]].copy()
     editable_df["created_at"] = editable_df["created_at"].apply(format_mmt)
 
-    # Reordering rank only makes sense against the full month's field of
-    # submissions -- when narrowed to a single BU, lock rank editing so a
-    # single-row "renumber" doesn't clobber that BU's true cross-BU rank.
+    # Reordering rank (including the auto-demote-on-Incomplete rule below)
+    # only makes sense against the full month's field of submissions --
+    # when narrowed to a single BU, lock rank editing so a single-row
+    # "renumber" doesn't clobber that BU's true cross-BU rank.
     rank_editable = bu_filter == "All Business Units"
     if not rank_editable:
-        st.caption("Switch the Business Unit filter to \"All Business Units\" to re-rank submissions against each other.")
+        st.caption(
+            "Switch the Business Unit filter to \"All Business Units\" to re-rank submissions against each other "
+            "-- this also applies to auto-demoting a submission marked Incomplete."
+        )
+    else:
+        st.caption("Marking a submission \"Incomplete / Needs Fix\" automatically drops it to last place when you apply changes.")
 
     edited_df = st.data_editor(
         editable_df,
@@ -1149,7 +1163,7 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
 
     if st.button("Apply Changes", key=f"apply_{month}_{bu_filter}", use_container_width=True):
         try:
-            apply_admin_overrides(original_df, edited_df)
+            apply_admin_overrides(original_df, edited_df, rank_editable)
             st.success("Changes applied.")
             st.rerun()
         except Exception as exc:
