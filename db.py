@@ -254,9 +254,15 @@ def get_overdue_bus(month_year: str, all_bus_df: pd.DataFrame) -> list:
 
 
 def get_next_rank(month_year: str) -> int:
-    """Arrival order within the month: 1st BU to submit gets rank 1."""
-    client = get_session_client()
-    resp = client.table("monthly_reports").select("id", count="exact").eq("month_year", month_year).execute()
+    """Arrival order within the month: 1st BU to submit gets rank 1.
+
+    Deliberately uses the SERVICE client, not the session client: RLS's
+    reports_select_own_or_admin policy only lets a non-admin BU user see
+    their OWN rows, so counting via the session client would always see 0
+    existing reports (they can never see anyone else's) and every BU
+    would get rank 1. This needs the true cross-BU count."""
+    service_client = get_service_client()
+    resp = service_client.table("monthly_reports").select("id", count="exact").eq("month_year", month_year).execute()
     return (resp.count or 0) + 1
 
 
