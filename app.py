@@ -234,38 +234,92 @@ def inject_custom_css() -> None:
 
         /* Login screen */
         .login-wrapper {
-            max-width: 400px;
-            margin: 4rem auto 0 auto;
+            max-width: 396px;
+            margin: 6vh auto 0 auto;
             background: var(--color-surface);
             border: 1px solid var(--color-border);
-            border-radius: 14px;
-            padding: 2.1rem 2.1rem 1.5rem 2.1rem;
-            box-shadow: var(--shadow-md);
+            border-radius: 16px;
+            padding: 2.3rem 2.3rem 1.7rem 2.3rem;
+            box-shadow: 0 4px 24px rgba(16, 24, 40, 0.08);
         }
         .login-wrapper .logo-mark {
-            width: 44px;
-            height: 44px;
-            border-radius: 10px;
+            width: 46px;
+            height: 46px;
+            border-radius: 11px;
             background: var(--color-primary);
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.35rem;
-            margin: 0 auto 1rem auto;
+            font-size: 1.4rem;
+            margin: 0 auto 1.1rem auto;
+            box-shadow: 0 4px 10px rgba(55, 48, 163, 0.28);
         }
         .login-wrapper h2 {
             text-align: center;
-            font-weight: 600;
-            font-size: 1.2rem;
+            font-weight: 700;
+            font-size: 1.25rem;
             letter-spacing: -0.01em;
             color: var(--color-text);
-            margin-bottom: 0.2rem;
+            margin-bottom: 0.25rem;
         }
         .login-wrapper p.subtitle {
             text-align: center;
             color: var(--color-text-muted);
             font-size: 0.85rem;
-            margin-bottom: 1.5rem;
+            margin-bottom: 1.75rem;
+        }
+        .login-wrapper p.footnote {
+            text-align: center;
+            color: var(--color-text-muted);
+            font-size: 0.78rem;
+            margin-top: 0.9rem;
+        }
+
+        /* Pill-style tab control (used by the login/register switcher) */
+        [data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 4px;
+            background: var(--color-bg);
+            padding: 4px;
+            border-radius: 10px;
+            border: 1px solid var(--color-border);
+        }
+        [data-testid="stTabs"] [data-baseweb="tab-highlight"],
+        [data-testid="stTabs"] [data-baseweb="tab-border"] {
+            display: none;
+        }
+        [data-testid="stTabs"] button[data-baseweb="tab"] {
+            flex: 1;
+            justify-content: center;
+            border-radius: 7px;
+            padding: 0.5rem 0;
+            color: var(--color-text-muted);
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        [data-testid="stTabs"] button[aria-selected="true"] {
+            background: var(--color-surface);
+            color: var(--color-primary);
+            box-shadow: var(--shadow-sm);
+        }
+        [data-testid="stTabs"] [data-testid="stMarkdownContainer"] p {
+            font-size: 0.85rem;
+        }
+
+        /* Text inputs */
+        .stTextInput input {
+            border-radius: 8px !important;
+            border: 1px solid var(--color-border) !important;
+            padding: 0.55rem 0.75rem !important;
+            font-size: 0.9rem !important;
+        }
+        .stTextInput input:focus {
+            border-color: var(--color-primary) !important;
+            box-shadow: 0 0 0 3px rgba(55, 48, 163, 0.12) !important;
+        }
+        .stTextInput label p {
+            font-size: 0.8rem !important;
+            font-weight: 600 !important;
+            color: var(--color-text) !important;
         }
 
         [data-testid="stSidebar"] {
@@ -308,6 +362,23 @@ STATUS_BADGE_CLASSES = {
 def status_badge_html(status: str) -> str:
     css_class = STATUS_BADGE_CLASSES.get(status, "badge-gray")
     return f'<span class="status-badge {css_class}">{status}</span>'
+
+
+def is_late_submission(created_at: str) -> bool:
+    """A submission is late if it landed after day DEADLINE_DAY_OF_MONTH of
+    the month, based on its own created_at (not "today") so history stays
+    accurate regardless of when it's viewed."""
+    try:
+        submitted_day = int(created_at[8:10])
+    except (TypeError, ValueError):
+        return False
+    return submitted_day > DEADLINE_DAY_OF_MONTH
+
+
+def late_badge_html(created_at: str) -> str:
+    if is_late_submission(created_at):
+        return '<span class="status-badge badge-red">\U0001F6AB Late</span>'
+    return ""
 
 
 # ===========================================================================
@@ -620,9 +691,10 @@ def render_login() -> None:
 
     with login_tab:
         with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("Username", placeholder="e.g. bu_sales")
-            password = st.text_input("Password", type="password", placeholder="••••••••")
+            username = st.text_input("\U0001F464 Username", placeholder="e.g. bu_sales")
+            password = st.text_input("\U0001F512 Password", type="password", placeholder="••••••••")
             submitted = st.form_submit_button("Log in", use_container_width=True)
+        st.markdown('<p class="footnote">Forgot your password? Contact your admin.</p>', unsafe_allow_html=True)
 
         if submitted:
             if not username or not password:
@@ -649,10 +721,10 @@ def render_login() -> None:
     with register_tab:
         st.caption("New Business Unit accounts require admin approval before you can log in.")
         with st.form("register_form", clear_on_submit=True):
-            reg_username = st.text_input("Choose a username", key="reg_username")
-            reg_bu_name = st.text_input("Business Unit name", key="reg_bu_name", placeholder="e.g. Sales BU")
-            reg_password = st.text_input("Choose a password", type="password", key="reg_password")
-            reg_password_confirm = st.text_input("Confirm password", type="password", key="reg_password_confirm")
+            reg_username = st.text_input("\U0001F464 Choose a username", key="reg_username")
+            reg_bu_name = st.text_input("\U0001F3E2 Business Unit name", key="reg_bu_name", placeholder="e.g. Sales BU")
+            reg_password = st.text_input("\U0001F512 Choose a password", type="password", key="reg_password")
+            reg_password_confirm = st.text_input("\U0001F512 Confirm password", type="password", key="reg_password_confirm")
             reg_submitted = st.form_submit_button("Request Access", use_container_width=True)
 
         if reg_submitted:
@@ -702,6 +774,11 @@ def render_bu_dashboard() -> None:
             st.error(f"⚠️ Deadline passed — submissions were due by day {DEADLINE_DAY_OF_MONTH} of the month. Please submit as soon as possible.")
 
     if existing:
+        if is_late_submission(existing["created_at"]):
+            st.error(
+                f"\U0001F6AB Late Submission: this report was submitted after the day-{DEADLINE_DAY_OF_MONTH} "
+                "deadline. It's still ranked normally, but please submit on time next month."
+            )
         st.success(f"Your report for {month_label} has been submitted!")
         col1, col2 = st.columns(2)
         with col1:
@@ -723,7 +800,7 @@ def render_bu_dashboard() -> None:
                 <div class="metric-card">
                     <div class="label">Uploaded File Details</div>
                     <div class="bu-name">{existing['file_name']}</div>
-                    {status_badge_html(existing['status'])}
+                    {status_badge_html(existing['status'])} {late_badge_html(existing['created_at'])}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -836,7 +913,8 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
         return
 
     original_df = pd.DataFrame(submissions)
-    editable_df = original_df[["submission_order", "bu_name", "file_name", "status", "created_at"]].copy()
+    original_df["timing"] = original_df["created_at"].apply(lambda ts: "Late" if is_late_submission(ts) else "On Time")
+    editable_df = original_df[["submission_order", "bu_name", "file_name", "status", "timing", "created_at"]].copy()
 
     # Reordering rank only makes sense against the full month's field of
     # submissions -- when narrowed to a single BU, lock rank editing so a
@@ -852,6 +930,7 @@ def render_admin_month_table(month: str, bu_filter: str) -> None:
             "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
             "file_name": st.column_config.TextColumn("File", disabled=True),
             "status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS),
+            "timing": st.column_config.TextColumn("Timing", disabled=True),
             "created_at": st.column_config.TextColumn("Submitted At", disabled=True),
         },
         hide_index=True,
@@ -1028,7 +1107,7 @@ def render_admin_dashboard() -> None:
                         <div class="label">Rank {rank}</div>
                         <div class="rank-badge">{medal}</div>
                         <div class="bu-name">{match['bu_name']}</div>
-                        {status_badge_html(match['status'])}
+                        {status_badge_html(match['status'])} {late_badge_html(match['created_at'])}
                     </div>
                     """,
                     unsafe_allow_html=True,
