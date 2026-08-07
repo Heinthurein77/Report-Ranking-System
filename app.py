@@ -151,10 +151,10 @@ def render_sidebar() -> None:
 
 
 def render_dashboard_header(title: str, badge_text: str = "") -> None:
-    """Branded top bar + an explicit refresh button beside it (in addition
-    to the one already in the sidebar), so re-fetching the latest data
-    doesn't require hunting for it."""
-    col_title, col_refresh = st.columns([5, 1])
+    """Branded top bar + explicit Refresh and Log out buttons beside it (in
+    addition to the same two already in the sidebar), so neither requires
+    hunting for it from within a dashboard."""
+    col_title, col_refresh, col_logout = st.columns([4.5, 1, 1])
     with col_title:
         st.markdown(
             f"""
@@ -171,6 +171,11 @@ def render_dashboard_header(title: str, badge_text: str = "") -> None:
     with col_refresh:
         st.markdown('<div style="height:0.55rem;"></div>', unsafe_allow_html=True)
         if st.button("\U0001F504 Refresh", key=f"refresh_{title}", use_container_width=True):
+            st.rerun()
+    with col_logout:
+        st.markdown('<div style="height:0.55rem;"></div>', unsafe_allow_html=True)
+        if st.button("Log out", key=f"logout_{title}", use_container_width=True):
+            auth.sign_out()
             st.rerun()
 
 
