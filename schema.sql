@@ -1,0 +1,138 @@
+-- ============================================================================
+-- BU Monthly Performance & Ranking System — Supabase schema + RLS
+-- ============================================================================
+-- Run this once in the Supabase SQL Editor (Dashboard -> SQL Editor -> New
+-- query). Auth is handled by Supabase Auth itself (auth.users); this file
+-- only creates the app's own tables, links them to auth.users via
+-- `profiles`, and locks them down with Row Level Security so that:
+--   - a BU user can only see/insert rows for their own business unit
+--   - an admin can see/edit everything
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 1. business_units
+-- ----------------------------------------------------------------------------
+create table if not exists business_units (
+    id uuid primary key default gen_random_uuid(),
+    bu_name text not null unique,
+    bu_code text not null unique,
+    created_at timestamptz not null default now()
+);
+
+-- ----------------------------------------------------------------------------
+-- 2. profiles — one row per auth.users row, added by the admin-provisioning
+--    flow in the app (there is no public self-signup in this version).
+-- ----------------------------------------------------------------------------
+create table if not exists profiles (
+    id uuid primary key references auth.users(id) on delete cascade,
+    full_name text,
+    role text not null default 'bu_user' check (role in ('admin', 'bu_user')),
+    bu_id uuid references business_units(id),
+    created_at timestamptz not null default now()
+);
+
+-- ----------------------------------------------------------------------------
+-- 3. monthly_reports
+-- ----------------------------------------------------------------------------
+create table if not exists monthly_reports (
+    id uuid primary key default gen_random_uuid(),
+    bu_id uuid not null references business_units(id),
+    month_year text not null,                          -- 'YYYY-MM'
+    metric_1 numeric not null check (metric_1 >= 0),
+    metric_2 numeric not null check (metric_2 >= 0),
+    total_score numeric not null,
+    rank int,
+    submitted_at timestamptz not null default now(),
+    status text not null default 'Submitted' check (status in ('Submitted', 'Late', 'Pending')),
+    submitted_by uuid references profiles(id),
+    unique (bu_id, month_year)                          -- one report per BU per month
+);
+
+-- ============================================================================
+-- Row Level Security
+-- ============================================================================
+alter table business_units enable row level security;
+alter table profiles enable row level security;
+alter table monthly_reports enable row level security;
+
+-- A profiles-select-from-inside-a-profiles-policy check would recurse
+-- infinitely under RLS, so role checks go through this SECURITY DEFINER
+-- function instead: it runs with the function owner's privileges, bypassing
+-- RLS for its own internal lookup, and simply returns true/false.
+create or replace function is_admin()
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+    select exists (
+        select 1 from profiles where id = auth.uid() and role = 'admin'
+    );
+$$;
+
+-- ----------------------------------------------------------------------------
+-- profiles policies
+-- ----------------------------------------------------------------------------
+create policy "profiles_select_self_or_admin" on profiles
+    for select
+    using (auth.uid() = id or is_admin());
+
+create policy "profiles_insert_admin" on profiles
+    for insert
+    with check (is_admin());
+
+create policy "profiles_update_admin" on profiles
+    for update
+    using (is_admin());
+
+-- ----------------------------------------------------------------------------
+-- business_units policies — every signed-in user can read (needed to
+-- populate BU dropdowns); only admin can add/edit business units.
+-- ----------------------------------------------------------------------------
+create policy "bu_select_authenticated" on business_units
+    for select
+    using (auth.role() = 'authenticated');
+
+create policy "bu_write_admin" on business_units
+    for all
+    using (is_admin())
+    with check (is_admin());
+
+-- ----------------------------------------------------------------------------
+-- monthly_reports policies
+-- ----------------------------------------------------------------------------
+create policy "reports_select_own_or_admin" on monthly_reports
+    for select
+    using (
+        is_admin()
+        or bu_id = (select bu_id from profiles where id = auth.uid())
+    );
+
+create policy "reports_insert_own_bu" on monthly_reports
+    for insert
+    with check (
+        bu_id = (select bu_id from profiles where id = auth.uid())
+    );
+
+-- Only admin can edit a report after it's been submitted (score
+-- corrections, marking incomplete, etc.) -- BU users cannot self-edit.
+create policy "reports_update_admin" on monthly_reports
+    for update
+    using (is_admin());
+
+create policy "reports_delete_admin" on monthly_reports
+    for delete
+    using (is_admin());
+
+-- ============================================================================
+-- Seed the first admin (run AFTER creating the auth user)
+-- ============================================================================
+-- 1. Create the admin's login in Supabase Dashboard -> Authentication ->
+--    Users -> Add User (set "Auto Confirm User" so no email step is needed),
+--    or via the app once one admin profile exists (chicken-and-egg for the
+--    very first admin, so the dashboard is the simplest path).
+-- 2. Copy that user's UUID and run:
+--
+--   insert into profiles (id, full_name, role, bu_id)
+--   values ('<uuid-from-auth.users>', 'Admin', 'admin', null);
