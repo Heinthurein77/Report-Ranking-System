@@ -72,6 +72,14 @@ def render_login() -> None:
                     elif profile.get("status") == "rejected":
                         auth.sign_out()
                         st.error("Your registration was rejected. Please contact your admin.")
+                    elif profile.get("status") != "approved":
+                        # Missing/unexpected status -- most likely the `status`
+                        # column migration in schema.sql hasn't been applied yet.
+                        auth.sign_out()
+                        st.error(
+                            "Your account is missing a valid status. If you're the admin, make sure the "
+                            "`status` column migration in schema.sql has been applied to your database."
+                        )
                     else:
                         st.session_state["profile"] = profile
                         st.rerun()

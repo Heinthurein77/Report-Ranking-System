@@ -88,14 +88,23 @@ $$;
 -- ----------------------------------------------------------------------------
 -- profiles policies
 -- ----------------------------------------------------------------------------
+-- Postgres has no "CREATE POLICY IF NOT EXISTS", so every policy below is
+-- preceded by a DROP POLICY IF EXISTS -- without this, re-running this file
+-- against a database that already has these policies fails with "policy
+-- already exists", and because Supabase's SQL Editor runs a pasted script
+-- as one transaction, that failure silently rolls back EVERYTHING in the
+-- same run, including any schema changes earlier in the file.
+drop policy if exists "profiles_select_self_or_admin" on profiles;
 create policy "profiles_select_self_or_admin" on profiles
     for select
     using (auth.uid() = id or is_admin());
 
+drop policy if exists "profiles_insert_admin" on profiles;
 create policy "profiles_insert_admin" on profiles
     for insert
     with check (is_admin());
 
+drop policy if exists "profiles_update_admin" on profiles;
 create policy "profiles_update_admin" on profiles
     for update
     using (is_admin());
@@ -104,10 +113,12 @@ create policy "profiles_update_admin" on profiles
 -- business_units policies — every signed-in user can read (needed to
 -- populate BU dropdowns); only admin can add/edit business units.
 -- ----------------------------------------------------------------------------
+drop policy if exists "bu_select_authenticated" on business_units;
 create policy "bu_select_authenticated" on business_units
     for select
     using (auth.role() = 'authenticated');
 
+drop policy if exists "bu_write_admin" on business_units;
 create policy "bu_write_admin" on business_units
     for all
     using (is_admin())
@@ -116,6 +127,7 @@ create policy "bu_write_admin" on business_units
 -- ----------------------------------------------------------------------------
 -- monthly_reports policies
 -- ----------------------------------------------------------------------------
+drop policy if exists "reports_select_own_or_admin" on monthly_reports;
 create policy "reports_select_own_or_admin" on monthly_reports
     for select
     using (
@@ -123,6 +135,7 @@ create policy "reports_select_own_or_admin" on monthly_reports
         or bu_id = (select bu_id from profiles where id = auth.uid())
     );
 
+drop policy if exists "reports_insert_own_bu" on monthly_reports;
 create policy "reports_insert_own_bu" on monthly_reports
     for insert
     with check (
@@ -131,10 +144,12 @@ create policy "reports_insert_own_bu" on monthly_reports
 
 -- Only admin can edit a report after it's been submitted (score
 -- corrections, marking incomplete, etc.) -- BU users cannot self-edit.
+drop policy if exists "reports_update_admin" on monthly_reports;
 create policy "reports_update_admin" on monthly_reports
     for update
     using (is_admin());
 
+drop policy if exists "reports_delete_admin" on monthly_reports;
 create policy "reports_delete_admin" on monthly_reports
     for delete
     using (is_admin());
