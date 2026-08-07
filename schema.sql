@@ -20,16 +20,30 @@ create table if not exists business_units (
 );
 
 -- ----------------------------------------------------------------------------
--- 2. profiles — one row per auth.users row, added by the admin-provisioning
---    flow in the app (there is no public self-signup in this version).
+-- 2. profiles — one row per auth.users row. Created either by an admin
+--    (Role Management panel, status='approved' immediately) or by public
+--    self-registration (status='pending' until an admin approves it --
+--    Supabase Auth itself doesn't know about "pending", so this status
+--    column is what the app checks after a successful login).
 -- ----------------------------------------------------------------------------
 create table if not exists profiles (
     id uuid primary key references auth.users(id) on delete cascade,
     full_name text,
     role text not null default 'bu_user' check (role in ('admin', 'bu_user')),
     bu_id uuid references business_units(id),
+    status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
     created_at timestamptz not null default now()
 );
+
+-- Safe to re-run against an already-created table (adds the column only if
+-- missing) -- lets you apply this update to a database from before `status`
+-- existed without dropping anything.
+alter table profiles add column if not exists status text not null default 'pending'
+    check (status in ('pending', 'approved', 'rejected'));
+
+-- Existing admin rows created before `status` existed must not be locked
+-- out by the new default of 'pending'.
+update profiles set status = 'approved' where role = 'admin' and status <> 'approved';
 
 -- ----------------------------------------------------------------------------
 -- 3. monthly_reports
@@ -134,5 +148,5 @@ create policy "reports_delete_admin" on monthly_reports
 --    very first admin, so the dashboard is the simplest path).
 -- 2. Copy that user's UUID and run:
 --
---   insert into profiles (id, full_name, role, bu_id)
---   values ('<uuid-from-auth.users>', 'Admin', 'admin', null);
+--   insert into profiles (id, full_name, role, bu_id, status)
+--   values ('<uuid-from-auth.users>', 'Admin', 'admin', null, 'approved');

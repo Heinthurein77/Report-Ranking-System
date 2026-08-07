@@ -41,32 +41,72 @@ st.set_page_config(
 def render_login() -> None:
     st.markdown(
         """
-        <div style="max-width:380px;margin:8vh auto 0 auto;">
+        <div style="max-width:420px;margin:6vh auto 0 auto;">
             <h2 style="text-align:center;">\U0001F4CA BU Performance &amp; Ranking</h2>
-            <p style="text-align:center;color:#94A3B8;">Sign in with your admin-provisioned account</p>
+            <p style="text-align:center;color:#94A3B8;">Sign in, or register a new Business Unit account</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
     col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Log in", use_container_width=True)
+        login_tab, register_tab = st.tabs(["Log in", "Register"])
 
-        if submitted:
-            if not email or not password:
-                st.error("Please enter both email and password.")
-            else:
-                with st.spinner("Signing in..."):
-                    profile = auth.sign_in(email.strip(), password)
-                if profile is None:
-                    st.error("Invalid email or password.")
+        with login_tab:
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Log in", use_container_width=True)
+
+            if submitted:
+                if not email or not password:
+                    st.error("Please enter both email and password.")
                 else:
-                    st.session_state["profile"] = profile
-                    st.rerun()
-        st.caption("No account? Ask your admin to create one from the Role Management panel.")
+                    with st.spinner("Signing in..."):
+                        profile = auth.sign_in(email.strip(), password)
+                    if profile is None:
+                        st.error("Invalid email or password.")
+                    elif profile.get("status") == "pending":
+                        auth.sign_out()
+                        st.warning("Your registration is awaiting admin approval. Please check back later.")
+                    elif profile.get("status") == "rejected":
+                        auth.sign_out()
+                        st.error("Your registration was rejected. Please contact your admin.")
+                    else:
+                        st.session_state["profile"] = profile
+                        st.rerun()
+
+        with register_tab:
+            st.caption("New Business Unit accounts require admin approval before you can log in.")
+            bu_options_df = db.get_business_units_public()
+
+            if bu_options_df.empty:
+                st.info("No Business Units have been set up yet -- ask your admin to add one before registering.")
+            else:
+                bu_choices = dict(zip(bu_options_df["bu_name"], bu_options_df["id"]))
+                with st.form("register_form", clear_on_submit=True):
+                    reg_full_name = st.text_input("Full name")
+                    reg_bu_label = st.selectbox("Business Unit", list(bu_choices.keys()))
+                    reg_email = st.text_input("Email")
+                    reg_password = st.text_input("Choose a password", type="password")
+                    reg_password_confirm = st.text_input("Confirm password", type="password")
+                    reg_submitted = st.form_submit_button("Request Access", use_container_width=True)
+
+                if reg_submitted:
+                    if not reg_full_name or not reg_email or not reg_password:
+                        st.error("Please fill in all fields.")
+                    elif len(reg_password) < 8:
+                        st.error("Password must be at least 8 characters.")
+                    elif reg_password != reg_password_confirm:
+                        st.error("Passwords do not match.")
+                    else:
+                        try:
+                            db.self_register(
+                                reg_email.strip(), reg_password, reg_full_name.strip(), bu_choices[reg_bu_label]
+                            )
+                            st.success("Registration submitted! An admin must approve your account before you can log in.")
+                        except Exception as exc:
+                            st.error(f"Registration failed: {exc}")
 
 
 # ============================================================================
@@ -251,7 +291,35 @@ def render_ranking_tab(all_bus_df: pd.DataFrame, month_year: str) -> None:
     )
 
 
+def render_pending_approvals(all_bus_df: pd.DataFrame) -> None:
+    st.markdown("#### ✅ Pending User Approvals")
+    pending_df = db.get_pending_profiles()
+
+    if pending_df.empty:
+        st.caption("No pending registrations.")
+        return
+
+    bu_lookup = dict(zip(all_bus_df["id"], all_bus_df["bu_name"])) if not all_bus_df.empty else {}
+
+    for _, row in pending_df.iterrows():
+        col_info, col_approve, col_reject = st.columns([3, 1, 1])
+        with col_info:
+            bu_name = bu_lookup.get(row["bu_id"], "—")
+            st.markdown(f"**{row['full_name']}** — {bu_name}  \n<span style='color:#94A3B8;font-size:0.8rem;'>Requested {row['created_at']}</span>", unsafe_allow_html=True)
+        with col_approve:
+            if st.button("Approve", key=f"approve_{row['id']}", use_container_width=True):
+                db.update_profile_status(row["id"], "approved")
+                st.rerun()
+        with col_reject:
+            if st.button("Reject", key=f"reject_{row['id']}", use_container_width=True):
+                db.update_profile_status(row["id"], "rejected")
+                st.rerun()
+
+
 def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
+    render_pending_approvals(all_bus_df)
+    st.divider()
+
     st.markdown("#### \U0001F3E2 Business Units")
     st.dataframe(all_bus_df, use_container_width=True, hide_index=True)
 
@@ -277,7 +345,7 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
     if not profiles_df.empty:
         profiles_df["bu_name"] = profiles_df["bu_id"].map(bu_lookup)
         st.dataframe(
-            profiles_df[["full_name", "role", "bu_name", "created_at"]], use_container_width=True, hide_index=True
+            profiles_df[["full_name", "role", "bu_name", "status", "created_at"]], use_container_width=True, hide_index=True
         )
     else:
         st.caption("No user accounts yet.")

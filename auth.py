@@ -1,9 +1,14 @@
 """
 auth.py
 -------
-Authentication against Supabase Auth (not a custom users table). There is
-no public self-signup in this version -- accounts are provisioned by an
-admin from the Role Management panel (see db.py: create_bu_user_account).
+Authentication against Supabase Auth (not a custom users table). Accounts
+come from two places: admin-provisioned (Role Management panel, approved
+immediately) or public self-registration (db.py: self_register), which
+starts a profile at status='pending'. Supabase Auth itself has no concept
+of "pending" -- sign_in_with_password succeeds on valid credentials
+regardless of status, so the pending/rejected gate is enforced here, one
+level up, by checking the profile after a successful Auth login and
+signing back out if it isn't approved.
 
 Session handling: Supabase's Python client is stateless across Streamlit
 reruns (each rerun is a fresh script execution), so the access/refresh
@@ -73,7 +78,12 @@ def init_session_state() -> None:
 
 
 def is_authenticated() -> bool:
-    return st.session_state.get("supabase_session") is not None and st.session_state.get("profile") is not None
+    profile = st.session_state.get("profile")
+    return (
+        st.session_state.get("supabase_session") is not None
+        and profile is not None
+        and profile.get("status") == "approved"
+    )
 
 
 def is_admin() -> bool:

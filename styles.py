@@ -30,8 +30,13 @@ def inject_custom_css() -> None:
             --card-border: #334155;
             --text: #F1F5F9;
             --text-muted: #94A3B8;
-            --accent: #6366F1;
-            --accent-hover: #4F46E5;
+            /* Teal, not indigo: distinct from the red/yellow/green status
+               badges (so "clickable" never reads as "status"), and higher
+               contrast against the dark surfaces -- 7.2:1 vs bg, 5.9:1 vs
+               card, versus 4.0:1 / 3.3:1 for the previous indigo (and its
+               old hover shade was under the 3:1 UI-contrast floor). */
+            --accent: #14B8A6;
+            --accent-hover: #0D9488;
         }
 
         html, body, [class*="css"] {
