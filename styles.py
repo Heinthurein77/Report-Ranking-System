@@ -30,13 +30,13 @@ def inject_custom_css() -> None:
             --card-border: #334155;
             --text: #F1F5F9;
             --text-muted: #94A3B8;
-            /* Teal, not indigo: distinct from the red/yellow/green status
-               badges (so "clickable" never reads as "status"), and higher
-               contrast against the dark surfaces -- 7.2:1 vs bg, 5.9:1 vs
-               card, versus 4.0:1 / 3.3:1 for the previous indigo (and its
-               old hover shade was under the 3:1 UI-contrast floor). */
-            --accent: #14B8A6;
-            --accent-hover: #0D9488;
+            /* Sky blue: distinct from the red/yellow/green status badges
+               (so "clickable" never reads as "status"), and clears
+               contrast comfortably against the dark surfaces -- 6.4:1 vs
+               bg, 5.3:1 vs card; hover shade 4.4:1 / 3.6:1, both above the
+               3:1 UI-contrast floor. */
+            --accent: #0EA5E9;
+            --accent-hover: #0284C7;
         }
 
         html, body, [class*="css"] {
