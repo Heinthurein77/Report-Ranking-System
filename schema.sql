@@ -46,21 +46,32 @@ alter table profiles add column if not exists status text not null default 'pend
 update profiles set status = 'approved' where role = 'admin' and status <> 'approved';
 
 -- ----------------------------------------------------------------------------
--- 3. monthly_reports
+-- 3. monthly_reports — a BU uploads a report FILE (any format, unparsed);
+--    there's no metric/score data entry. Rank is arrival order within the
+--    month (1st BU to submit = rank 1), admin-editable afterward.
 -- ----------------------------------------------------------------------------
 create table if not exists monthly_reports (
     id uuid primary key default gen_random_uuid(),
     bu_id uuid not null references business_units(id),
     month_year text not null,                          -- 'YYYY-MM'
-    metric_1 numeric not null check (metric_1 >= 0),
-    metric_2 numeric not null check (metric_2 >= 0),
-    total_score numeric not null,
+    file_name text,
+    file_url text,
+    file_path text,                                     -- storage object path, for cleanup/reference
     rank int,
     submitted_at timestamptz not null default now(),
     status text not null default 'Submitted' check (status in ('Submitted', 'Late', 'Pending')),
     submitted_by uuid references profiles(id),
     unique (bu_id, month_year)                          -- one report per BU per month
 );
+
+-- Migration for a database created before this file-based version: drop
+-- the old metric/score columns, add the file columns. Safe to re-run.
+alter table monthly_reports drop column if exists metric_1;
+alter table monthly_reports drop column if exists metric_2;
+alter table monthly_reports drop column if exists total_score;
+alter table monthly_reports add column if not exists file_name text;
+alter table monthly_reports add column if not exists file_url text;
+alter table monthly_reports add column if not exists file_path text;
 
 -- ============================================================================
 -- Row Level Security

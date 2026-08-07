@@ -3,20 +3,24 @@ app.py
 ------
 BU Monthly Performance & Ranking System -- main Streamlit entrypoint.
 
+BU users upload a report FILE (any format, unparsed) and see only their
+own rank -- no metric entry, no visibility into other BUs' data. Rank is
+arrival order within the month, admin-editable afterward. Admin can view/
+download every submitted file and override rank/status.
+
 Architecture (see the other modules for the "why"):
     supabase_client.py  Two Supabase clients: per-user session (RLS-scoped)
-                         and service-role (admin provisioning only).
+                         and service-role (self-registration / storage).
     auth.py              Supabase Auth sign-in/out, session + profile state.
     db.py                Data access layer (business_units, profiles,
-                         monthly_reports).
-    ranking.py            Pure scoring/deadline/ranking functions (pandas).
-    styles.py             Dark Slate CSS + metric-card/status-badge HTML.
+                         monthly_reports, Supabase Storage uploads).
+    ranking.py            Pure deadline/ranking functions (pandas).
+    styles.py             Sky Blue light theme CSS + metric-card/status-badge HTML.
 
 Required Supabase setup: run schema.sql once (creates tables + RLS), then
 seed one admin profile as described at the bottom of that file.
 """
 
-import io
 from datetime import date
 
 import pandas as pd
@@ -144,6 +148,9 @@ def render_deadline_countdown_value(month_year: str) -> tuple:
 # ============================================================================
 # BU user dashboard
 # ============================================================================
+MAX_UPLOAD_MB = 15
+
+
 def render_bu_dashboard() -> None:
     profile = st.session_state["profile"]
     bu_id = profile.get("bu_id")
@@ -151,6 +158,10 @@ def render_bu_dashboard() -> None:
     if not bu_id:
         st.error("Your account isn't linked to a Business Unit yet. Please contact your admin.")
         return
+
+    all_bus_df = db.get_business_units()
+    bu_row = all_bus_df[all_bus_df["id"] == bu_id]
+    bu_name = bu_row.iloc[0]["bu_name"] if not bu_row.empty else "your BU"
 
     month_year = date.today().strftime("%Y-%m")
     month_label = date.today().strftime("%B %Y")
@@ -165,56 +176,38 @@ def render_bu_dashboard() -> None:
 
     if existing:
         st.success(f"Your {month_label} report has been submitted.")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(metric_card_html("Metric 1", str(existing["metric_1"])), unsafe_allow_html=True)
-        with col2:
-            st.markdown(metric_card_html("Metric 2", str(existing["metric_2"])), unsafe_allow_html=True)
-        with col3:
-            st.markdown(metric_card_html("Total Score", str(existing["total_score"])), unsafe_allow_html=True)
+        st.markdown(
+            metric_card_html("Your Rank", f"#{existing['rank']}" if existing.get("rank") else "—"),
+            unsafe_allow_html=True,
+        )
+        st.write("")
+        st.markdown(f"**File:** {existing['file_name']}")
         st.markdown(status_badge_html(existing["status"]), unsafe_allow_html=True)
+        st.markdown(f"[\U0001F4E5 View / download your file]({existing['file_url']})")
         st.caption("Need a correction? Ask your admin -- only admin can edit a submitted report.")
         return
 
-    st.info("Enter your two metrics below, or upload a single-row CSV with `metric_1,metric_2` columns.")
+    st.info("Upload your report file below -- any format is accepted as-is, nothing is parsed or validated.")
 
-    input_mode = st.radio("Input method", ["Manual entry", "CSV upload"], horizontal=True)
+    uploaded_file = st.file_uploader("Upload report file", type=None)
 
-    metric_1 = metric_2 = None
-
-    if input_mode == "Manual entry":
-        col1, col2 = st.columns(2)
-        with col1:
-            metric_1 = st.number_input("Metric 1", min_value=0.0, step=1.0, format="%.2f")
-        with col2:
-            metric_2 = st.number_input("Metric 2", min_value=0.0, step=1.0, format="%.2f")
-    else:
-        csv_file = st.file_uploader("Upload CSV (one row, columns: metric_1, metric_2)", type=["csv"])
-        if csv_file is not None:
-            try:
-                csv_df = pd.read_csv(io.BytesIO(csv_file.getvalue()))
-                metric_1 = float(csv_df.loc[0, "metric_1"])
-                metric_2 = float(csv_df.loc[0, "metric_2"])
-                st.write(f"Parsed: Metric 1 = {metric_1}, Metric 2 = {metric_2}")
-            except (KeyError, IndexError, ValueError) as exc:
-                st.error(f"Could not parse CSV: {exc}. Expected columns `metric_1,metric_2` with one data row.")
-
-    if st.button("Submit Report", use_container_width=True):
-        errors = ranking.validate_metrics(metric_1, metric_2)
-        if errors:
-            for err in errors:
-                st.error(err)
+    if uploaded_file is not None:
+        size_mb = uploaded_file.size / (1024 * 1024)
+        if size_mb > MAX_UPLOAD_MB:
+            st.error(f"File is {size_mb:.1f} MB, which exceeds the {MAX_UPLOAD_MB} MB limit.")
         else:
-            try:
-                total_score = ranking.compute_total_score(metric_1, metric_2)
-                status = ranking.determine_status(ranking.now_mmt(), month_year)
-                db.insert_report(
-                    bu_id, month_year, metric_1, metric_2, total_score, status, st.session_state["auth_user_id"]
-                )
-                st.success(f"Report submitted! Status: {status}")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Submission failed: {exc}")
+            st.caption(f"Ready to submit: **{uploaded_file.name}** ({size_mb:.2f} MB)")
+            if st.button("Submit Report", use_container_width=True):
+                try:
+                    status = ranking.determine_status(ranking.now_mmt(), month_year)
+                    with st.spinner("Uploading..."):
+                        db.insert_report(
+                            bu_id, bu_name, month_year, uploaded_file, status, st.session_state["auth_user_id"]
+                        )
+                    st.success(f"Report submitted! Status: {status}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Submission failed: {exc}")
 
 
 # ============================================================================
@@ -246,23 +239,29 @@ def render_ranking_tab(all_bus_df: pd.DataFrame, month_year: str) -> None:
 
     ranked_df = ranking.compute_rankings(all_bus_df, reports_df)
 
-    display_df = ranked_df[["bu_name", "bu_code", "metric_1", "metric_2", "total_score", "rank", "status"]].copy()
+    display_df = ranked_df[["bu_name", "bu_code", "rank", "status", "file_name"]].copy()
     display_df["rank"] = display_df["rank"].apply(lambda r: int(r) if pd.notna(r) else None)
 
     st.markdown("#### \U0001F3C6 Current Ranking")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    st.markdown("#### \U0001F527 Admin Control Panel — Edit &amp; Override Scores")
-    st.caption("Edit metrics or status for any BU below, then Recalculate & Save.")
+    submitted_df = ranked_df[ranked_df["id"].notna()]
+    if not submitted_df.empty:
+        with st.expander("View / download submitted files"):
+            for _, row in submitted_df.iterrows():
+                st.markdown(f"- **{row['bu_name']}** — [{row['file_name']}]({row['file_url']})")
 
-    editable_df = ranked_df[ranked_df["id"].notna()][["id", "bu_name", "metric_1", "metric_2", "status"]].copy()
+    st.markdown("#### \U0001F527 Admin Control Panel — Override Rank &amp; Status")
+    st.caption("Edit rank or status for any BU below, then Save Changes.")
+
+    editable_df = submitted_df[["id", "bu_name", "rank", "status"]].copy()
+    editable_df["rank"] = editable_df["rank"].astype(int)
     edited_df = st.data_editor(
         editable_df,
         column_config={
             "id": None,  # hide the raw id column but keep it in the dataframe for updates
             "bu_name": st.column_config.TextColumn("Business Unit", disabled=True),
-            "metric_1": st.column_config.NumberColumn("Metric 1", min_value=0.0),
-            "metric_2": st.column_config.NumberColumn("Metric 2", min_value=0.0),
+            "rank": st.column_config.NumberColumn("Rank", min_value=1, step=1),
             "status": st.column_config.SelectboxColumn("Status", options=["Submitted", "Late", "Pending"]),
         },
         hide_index=True,
@@ -271,16 +270,14 @@ def render_ranking_tab(all_bus_df: pd.DataFrame, month_year: str) -> None:
         key=f"admin_editor_{month_year}",
     )
 
-    if st.button("\U0001F504 Recalculate & Save Ranking", use_container_width=True):
+    if st.button("\U0001F504 Save Ranking Changes", use_container_width=True):
         try:
             for i in range(len(editable_df)):
                 report_id = editable_df.iloc[i]["id"]
-                new_m1 = edited_df.iloc[i]["metric_1"]
-                new_m2 = edited_df.iloc[i]["metric_2"]
+                new_rank = int(edited_df.iloc[i]["rank"])
                 new_status = edited_df.iloc[i]["status"]
-                new_total = ranking.compute_total_score(new_m1, new_m2)
-                db.update_report(report_id, new_m1, new_m2, new_total, new_status)
-            st.success("Scores recalculated and saved.")
+                db.update_report_rank_status(report_id, new_rank, new_status)
+            st.success("Ranking changes saved.")
             st.rerun()
         except Exception as exc:
             st.error(f"Could not save changes: {exc}")

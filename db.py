@@ -14,6 +14,7 @@ their own account AND their own Business Unit name at registration time
 registrations and controlling existing accounts afterward (role/status).
 """
 
+import os
 import re
 from typing import Optional
 
@@ -21,13 +22,15 @@ import pandas as pd
 
 from supabase_client import get_session_client, get_service_client
 
+STORAGE_BUCKET = "bu-reports"
+
 # pd.DataFrame([]) has zero COLUMNS, not just zero rows -- which breaks any
 # downstream .merge()/column access once a query legitimately returns no
 # rows (e.g. no reports yet for the selected month). These are the real
 # table columns, used to keep an empty result properly shaped.
 BUSINESS_UNIT_COLUMNS = ["id", "bu_name", "bu_code", "created_at"]
 REPORT_COLUMNS = [
-    "id", "bu_id", "month_year", "metric_1", "metric_2", "total_score",
+    "id", "bu_id", "month_year", "file_name", "file_url", "file_path",
     "rank", "submitted_at", "status", "submitted_by",
 ]
 PROFILE_COLUMNS = ["id", "full_name", "role", "bu_id", "status", "created_at"]
@@ -229,14 +232,50 @@ def get_available_months() -> list:
     return sorted({row["month_year"] for row in (resp.data or [])}, reverse=True)
 
 
-def insert_report(bu_id: str, month_year: str, metric_1: float, metric_2: float, total_score: float, status: str, submitted_by: str) -> dict:
+def get_next_rank(month_year: str) -> int:
+    """Arrival order within the month: 1st BU to submit gets rank 1."""
+    client = get_session_client()
+    resp = client.table("monthly_reports").select("id", count="exact").eq("month_year", month_year).execute()
+    return (resp.count or 0) + 1
+
+
+def upload_report_file(uploaded_file, bu_name: str, month_year: str) -> dict:
+    """Uploads the raw file to Supabase Storage -- no parsing or content
+    validation, any format is accepted as-is, per spec. Uses the SERVICE
+    client for the storage write (Storage has its own policy system
+    separate from table RLS; the app layer already only lets a BU upload
+    under its own bu_name via its own dashboard, so this is a deliberate
+    simplification rather than also standing up Storage-level policies)."""
+    service_client = get_service_client()
+
+    clean_bu_name = re.sub(r"[^A-Za-z0-9]+", "_", bu_name.strip()).strip("_") or "bu"
+    ext = os.path.splitext(uploaded_file.name)[1] or ".xlsx"
+    display_name = f"{clean_bu_name}_{month_year}{ext}"
+    file_path = f"{clean_bu_name.lower()}/{display_name}"
+    file_bytes = uploaded_file.getvalue()
+
+    service_client.storage.from_(STORAGE_BUCKET).upload(
+        path=file_path,
+        file=file_bytes,
+        file_options={"content-type": uploaded_file.type or "application/octet-stream"},
+    )
+
+    public_url = service_client.storage.from_(STORAGE_BUCKET).get_public_url(file_path)
+    return {"file_name": display_name, "file_url": public_url, "file_path": file_path}
+
+
+def insert_report(bu_id: str, bu_name: str, month_year: str, uploaded_file, status: str, submitted_by: str) -> dict:
+    file_info = upload_report_file(uploaded_file, bu_name, month_year)
+    rank = get_next_rank(month_year)
+
     client = get_session_client()
     record = {
         "bu_id": bu_id,
         "month_year": month_year,
-        "metric_1": metric_1,
-        "metric_2": metric_2,
-        "total_score": total_score,
+        "file_name": file_info["file_name"],
+        "file_url": file_info["file_url"],
+        "file_path": file_info["file_path"],
+        "rank": rank,
         "status": status,
         "submitted_by": submitted_by,
     }
@@ -244,10 +283,8 @@ def insert_report(bu_id: str, month_year: str, metric_1: float, metric_2: float,
     return resp.data[0]
 
 
-def update_report(report_id: str, metric_1: float, metric_2: float, total_score: float, status: str) -> None:
+def update_report_rank_status(report_id: str, rank: int, status: str) -> None:
     """Admin correction path -- RLS only allows this via the admin's own
     session (reports_update_admin policy checks is_admin())."""
     client = get_session_client()
-    client.table("monthly_reports").update(
-        {"metric_1": metric_1, "metric_2": metric_2, "total_score": total_score, "status": status}
-    ).eq("id", report_id).execute()
+    client.table("monthly_reports").update({"rank": rank, "status": status}).eq("id", report_id).execute()
