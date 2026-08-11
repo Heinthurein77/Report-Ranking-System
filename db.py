@@ -163,6 +163,17 @@ def apply_profile_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) ->
             client.table("profiles").update(changes).eq("id", profile_id).execute()
 
 
+def delete_user_account(profile_id: str) -> None:
+    """Admin-only: permanently deletes a user's login. Requires the
+    SERVICE client -- Supabase Auth's admin.delete_user() is a privileged
+    action RLS can't grant regardless of the acting session. Deleting the
+    auth.users row cascades to the matching profiles row automatically
+    (profiles.id references auth.users(id) on delete cascade), so no
+    separate profiles delete is needed."""
+    service_client = get_service_client()
+    service_client.auth.admin.delete_user(profile_id)
+
+
 def self_register(email: str, password: str, full_name: str, bu_name: str) -> dict:
     """Public self-registration: the login itself is created via the
     ordinary (public) sign-up endpoint on the anon-key client -- no

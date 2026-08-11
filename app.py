@@ -496,6 +496,27 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
         except Exception as exc:
             st.error(f"Could not apply changes: {exc}")
 
+    with st.expander("⚠️ Danger Zone: Delete a user"):
+        deletable_df = filtered_profiles_df[filtered_profiles_df["role"] != "admin"]
+        if deletable_df.empty:
+            st.caption("No deletable users (admin accounts can't be deleted here).")
+        else:
+            delete_options = {f"{row['full_name']} — {row['bu_name']}": row["id"] for _, row in deletable_df.iterrows()}
+            delete_choice = st.selectbox(
+                "Select a user to permanently delete", list(delete_options.keys()), key="delete_user_select"
+            )
+            delete_confirm = st.checkbox(
+                "I understand this permanently deletes this user's login and cannot be undone.",
+                key="delete_user_confirm",
+            )
+            if st.button("Delete User", key="delete_user_btn", disabled=not delete_confirm, use_container_width=True):
+                try:
+                    db.delete_user_account(delete_options[delete_choice])
+                    st.success(f"Deleted {delete_choice}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not delete user: {exc}")
+
 
 def render_analytics_tab(all_bus_df: pd.DataFrame) -> None:
     history_df = db.get_all_reports_history()
