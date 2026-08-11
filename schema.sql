@@ -60,9 +60,19 @@ create table if not exists monthly_reports (
     rank int,
     submitted_at timestamptz not null default now(),
     status text not null default 'Submitted' check (status in ('Submitted', 'Late', 'Pending')),
-    submitted_by uuid references profiles(id),
+    submitted_by uuid references profiles(id) on delete set null,
     unique (bu_id, month_year)                          -- one report per BU per month
 );
+
+-- Migration for a database created before "on delete set null" was added
+-- above: without it, deleting a user who ever submitted a report fails
+-- outright (Supabase Auth cascades auth.users -> profiles, which then hits
+-- this FK with no ON DELETE behavior and rejects the whole delete). This
+-- preserves the report/ranking data -- only the "who submitted it"
+-- attribution is cleared, never the file or rank. Safe to re-run.
+alter table monthly_reports drop constraint if exists monthly_reports_submitted_by_fkey;
+alter table monthly_reports add constraint monthly_reports_submitted_by_fkey
+    foreign key (submitted_by) references profiles(id) on delete set null;
 
 -- Migration for a database created before this file-based version: drop
 -- the old metric/score columns, add the file columns. Safe to re-run.

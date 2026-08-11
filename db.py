@@ -164,14 +164,39 @@ def apply_profile_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) ->
 
 
 def delete_user_account(profile_id: str) -> None:
-    """Admin-only: permanently deletes a user's login. Requires the
-    SERVICE client -- Supabase Auth's admin.delete_user() is a privileged
-    action RLS can't grant regardless of the acting session. Deleting the
-    auth.users row cascades to the matching profiles row automatically
-    (profiles.id references auth.users(id) on delete cascade), so no
-    separate profiles delete is needed."""
+    """Admin-only: permanently deletes a user's login, and their Business
+    Unit along with it IF that BU is now orphaned (no other user account
+    and no submitted reports reference it). Requires the SERVICE client --
+    Supabase Auth's admin.delete_user() is a privileged action RLS can't
+    grant regardless of the acting session.
+
+    Deleting the auth.users row cascades to the matching profiles row
+    automatically (profiles.id references auth.users(id) on delete
+    cascade), so no separate profiles delete is needed for the user
+    itself. business_units has no ON DELETE behavior on either FK
+    though, so it's only safe to delete when nothing still points to it --
+    otherwise the delete would either fail outright (protecting a BU
+    that's still shared) or, if it succeeded, silently orphan real
+    ranking history. Multiple users can share a BU name, so the BU is
+    deliberately NOT force-deleted just because one of its users is gone."""
     service_client = get_service_client()
+
+    profile_resp = service_client.table("profiles").select("bu_id").eq("id", profile_id).limit(1).execute()
+    bu_id = profile_resp.data[0]["bu_id"] if profile_resp.data else None
+
     service_client.auth.admin.delete_user(profile_id)
+
+    if not bu_id:
+        return
+
+    other_users = (
+        service_client.table("profiles").select("id", count="exact").eq("bu_id", bu_id).execute()
+    )
+    other_reports = (
+        service_client.table("monthly_reports").select("id", count="exact").eq("bu_id", bu_id).execute()
+    )
+    if not (other_users.count or 0) and not (other_reports.count or 0):
+        service_client.table("business_units").delete().eq("id", bu_id).execute()
 
 
 def self_register(email: str, password: str, full_name: str, bu_name: str) -> dict:
