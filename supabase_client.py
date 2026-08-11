@@ -41,13 +41,36 @@ def get_session_client() -> Client:
     """Anon-key client, authenticated as the logged-in user (if any) so
     every query is subject to RLS as that user. Not cached with
     st.cache_resource -- it's cheap to construct and must reflect whichever
-    user is logged in in *this* browser session."""
+    user is logged in in *this* browser session.
+
+    client.auth.set_session() makes a real network call to refresh the
+    access token, and Supabase ROTATES the refresh token on every use --
+    the one just used becomes invalid. A single page render calls this
+    function many times (once per db.py query), so without saving the
+    newly-issued pair back to session_state, the second call in the same
+    render reuses the now-stale refresh token and fails with an
+    "Invalid Refresh Token" AuthApiError."""
     url = _get_secret("SUPABASE_URL")
     anon_key = _get_secret("SUPABASE_ANON_KEY")
     client = create_client(url, anon_key)
 
     session = st.session_state.get("supabase_session")
     if session:
-        client.auth.set_session(session["access_token"], session["refresh_token"])
+        try:
+            result = client.auth.set_session(session["access_token"], session["refresh_token"])
+        except Exception:
+            # Genuinely expired/invalid (not just stale from rotation) --
+            # clear the dead session and bounce back to a clean login
+            # instead of every subsequent query crashing with a confusing
+            # auth error.
+            for key in ("supabase_session", "auth_user_id", "auth_email", "profile"):
+                st.session_state.pop(key, None)
+            st.rerun()
+        else:
+            if result and result.session:
+                st.session_state["supabase_session"] = {
+                    "access_token": result.session.access_token,
+                    "refresh_token": result.session.refresh_token,
+                }
 
     return client
