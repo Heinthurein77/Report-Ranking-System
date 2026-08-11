@@ -55,10 +55,29 @@ st.set_page_config(
 )
 
 
+def flash(message: str, kind: str = "success") -> None:
+    """Streamlit clears whatever a script just rendered (including
+    st.success/st.error) the instant st.rerun() fires, before the user
+    can actually read it -- so every action that reruns right after
+    succeeding/failing stores its notification here instead, and
+    render_flash() (called once near the top of every page) displays it
+    AFTER the rerun completes, where it's actually visible."""
+    st.session_state["_flash"] = (kind, message)
+
+
+def render_flash() -> None:
+    flash_data = st.session_state.pop("_flash", None)
+    if not flash_data:
+        return
+    kind, message = flash_data
+    getattr(st, kind)(message)
+
+
 # ============================================================================
 # Login page
 # ============================================================================
 def render_login() -> None:
+    render_flash()
     st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
     st.markdown('<div class="logo-mark">\U0001F4CA</div>', unsafe_allow_html=True)
     st.markdown("<h2>BU Performance &amp; Ranking</h2>", unsafe_allow_html=True)
@@ -258,7 +277,7 @@ def render_bu_dashboard() -> None:
                         db.insert_report(
                             bu_id, bu_name, month_year, uploaded_file, status, st.session_state["auth_user_id"]
                         )
-                    st.success(f"Report submitted! Status: {status}")
+                    flash(f"Report submitted! Status: {status}")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Submission failed: {exc}")
@@ -370,7 +389,7 @@ def render_ranking_tab(all_bus_df: pd.DataFrame, month_year: str) -> None:
                     new_rank = int(edited_df.iloc[i]["rank"])
                     new_status = edited_df.iloc[i]["status"]
                     db.update_report_rank_status(report_id, new_rank, new_status)
-                st.success("Ranking changes saved.")
+                flash("Ranking changes saved.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Could not save changes: {exc}")
@@ -388,7 +407,7 @@ def render_ranking_tab(all_bus_df: pd.DataFrame, month_year: str) -> None:
                 try:
                     row = options[choice]
                     db.delete_report(row["id"], row["file_path"], month_year)
-                    st.success(f"Deleted {choice}.")
+                    flash(f"Deleted {choice}.")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not delete: {exc}")
@@ -423,10 +442,12 @@ def render_pending_approvals(all_bus_df: pd.DataFrame) -> None:
         with col_approve:
             if st.button("Approve", key=f"approve_{row['id']}", use_container_width=True):
                 db.update_profile_status(row["id"], "approved")
+                flash(f"Approved {row['full_name']}.")
                 st.rerun()
         with col_reject:
             if st.button("Reject", key=f"reject_{row['id']}", use_container_width=True):
                 db.update_profile_status(row["id"], "rejected")
+                flash(f"Rejected {row['full_name']}.", kind="warning")
                 st.rerun()
 
 
@@ -491,7 +512,7 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
     if st.button("Apply Changes", key="apply_user_control", use_container_width=True):
         try:
             db.apply_profile_changes(filtered_profiles_df, edited_df)
-            st.success("User accounts updated.")
+            flash("User accounts updated.")
             st.rerun()
         except Exception as exc:
             st.error(f"Could not apply changes: {exc}")
@@ -512,7 +533,7 @@ def render_role_management_tab(all_bus_df: pd.DataFrame) -> None:
             if st.button("Delete User", key="delete_user_btn", disabled=not delete_confirm, use_container_width=True):
                 try:
                     db.delete_user_account(delete_options[delete_choice])
-                    st.success(f"Deleted {delete_choice}.")
+                    flash(f"Deleted {delete_choice}.")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not delete user: {exc}")
@@ -670,6 +691,7 @@ def main() -> None:
         return
 
     render_sidebar()
+    render_flash()
 
     if auth.is_admin():
         render_admin_dashboard()
